@@ -614,6 +614,20 @@ class Glm44MoEObserverHookConfig(MoETransformerObserverConfig):
     fused_experts: bool = False
 
 
+@dataclass
+class SolarOpenForCausalLMObserverHookConfig(MoETransformerObserverConfig):
+    module_class_name_to_hook_regex: Optional[str] = "SolarOpenForCausalLM"
+    num_experts_attr_name: str = "n_routed_experts"
+    top_k_attr_name: str = "num_experts_per_tok"
+    fused_experts: bool = False
+
+@dataclass
+class VaetkiForCausalLMObserverHookConfig(MoETransformerObserverConfig):
+    module_class_name_to_hook_regex: Optional[str] = "VaetkiForCausalLM"
+    num_experts_attr_name: str = "n_routed_experts"
+    top_k_attr_name: str = "num_experts_per_tok"
+    fused_experts: bool = False
+
 OBSERVER_CONFIG_REGISTRY = {
     "Qwen3MoeForCausalLM": Qwen3MoEObserverHookConfig,
     "NonUniformQwen3MoeForCausalLM": Qwen3MoEObserverHookConfig,
@@ -622,5 +636,7 @@ OBSERVER_CONFIG_REGISTRY = {
     "DeepseekV2ForCausalLM": DeepSeekMoEObserverHookConfig,
     "Ernie4_5_MoEForCausalLM": Ernie4_5MoEObserverHookConfig,
     "Ernie4_5_MoeForCausalLM": Ernie4_5MoEObserverHookConfig,
-    "Glm4MoeForCausalLM": Glm44MoEObserverHookConfig,
+    "Glm4MoeForCausalLM": Glm44MoEObserverHookConfig,    "SolarOpenForCausalLM": SolarOpenForCausalLMObserverHookConfig,
+    "VaetkiForCausalLM": VaetkiForCausalLMObserverHookConfig,
+
 }

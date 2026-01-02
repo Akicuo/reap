@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 from datasets import load_dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM, HfArgumentParser
+from transformers import AutoTokenizer, AutoModelForCausalLM, HfArgumentParser, BitsAndBytesConfig
 
 from accelerate.utils import set_seed
 from accelerate.hooks import remove_hook_from_module
@@ -604,12 +604,22 @@ def main():
     model_name = patched_model_map(model_args.model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     # load model
+    quantization_config = None
+    if obs_args.load_in_4bit:
+        logger.info("Loading model in 4-bit quantization to reduce VRAM during expert analysis.")
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         device_map="auto",
         torch_dtype="auto",
         trust_remote_code=True,
         # local_files_only=True,
+        quantization_config=quantization_config,
     )
 
     # record activations or load previously recorded activations

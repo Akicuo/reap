@@ -146,6 +146,12 @@ class ObserverArgs:
             )
         }, 
     )
+    load_in_4bit: bool = field(
+        default=False,
+        metadata={
+            "help": "Load model in 4-bit quantization to reduce VRAM during expert analysis."
+        },
+    )
 
 @dataclass
 class ClusterArgs:

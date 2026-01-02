@@ -8,7 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
-
+venv/
 # reap specfic
 artifacts/
 scratch/

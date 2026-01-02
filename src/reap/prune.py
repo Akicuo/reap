@@ -7,6 +7,7 @@ import time
 from typing import Any
 import gc
 import yaml
+import os
 
 import torch
 from tqdm import tqdm
@@ -38,6 +39,14 @@ import shutil
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Read a boolean-like environment variable."""
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return val.strip().lower() not in ("0", "false", "no", "off", "")
 
 
 def dump_args_to_yaml(
@@ -253,6 +262,7 @@ def main():
     model_name = patched_model_map(model_args.model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     # load model
+    local_only = _env_flag("REAP_LOCAL_FILES_ONLY", True)
     quantization_config = None
     if obs_args.load_in_4bit:
         logger.info("Loading model in 4-bit quantization to reduce VRAM during expert analysis.")
@@ -267,7 +277,7 @@ def main():
         device_map="auto",
         torch_dtype="auto",
         trust_remote_code=True,
-        local_files_only=False,
+        local_files_only=local_only,
         quantization_config=quantization_config,
     )
     # record activations or load previously recorded activations

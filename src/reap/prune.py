@@ -241,6 +241,52 @@ def get_pruned_model_dir(
     return pruned_model_dir
 
 
+def reload_model_in_full_precision(
+    model_name: str,
+    tokenizer: AutoTokenizer,
+    local_only: bool,
+    model_class_name: str,
+):
+    """
+    Reload the model in full precision (bfloat16) for pruning.
+    
+    This is used after observer analysis with 4-bit quantization to ensure
+    the pruned model is saved in full precision, not 4-bit.
+    """
+    logger.info("Reloading model in full precision (bfloat16) for pruning...")
+    
+    # Remove quantization config to load in full precision
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        device_map="auto",
+        dtype=torch.bfloat16,  # Force bfloat16
+        trust_remote_code=True,
+        local_files_only=local_only,
+        quantization_config=None,  # No quantization
+    )
+    
+    # Re-apply patches for the new model instance
+    # 1. Ensure model is in MODEL_ATTRS (auto-register if needed)
+    if not ensure_model_registered(model):
+        logger.warning(f"Could not auto-register MODEL_ATTRS for {model_class_name}, pruning may fail")
+    
+    # 2. Ensure model has observer config (auto-register if needed)
+    if not ensure_observer_config(model):
+        logger.warning(f"Could not auto-register observer config for {model_class_name}, pruning may fail")
+    
+    # 3. Auto-patch MoE blocks for router_logits if needed
+    if needs_patching(model):
+        logger.info(f"Auto-patching MoE blocks for {model_class_name} to expose router_logits")
+        patched_count = patch_specific_model(model, model_class_name)
+        if patched_count == 0:
+            # Try generic patcher
+            patched_count = auto_patch_moe(model)
+        if patched_count == 0:
+            logger.warning(f"Could not patch any MoE blocks for {model_class_name}, pruning may fail")
+    
+    return model
+
+
 def main():
     parser = HfArgumentParser(
         (
@@ -366,6 +412,26 @@ def main():
             "Skipping pruning step."
         )
     else:
+        # If 4-bit was used for observer, reload model in full precision for pruning
+        if obs_args.load_in_4bit:
+            logger.info("4-bit quantization was used for observer analysis.")
+            logger.info("Reloading model in full precision (bfloat16) for pruning...")
+            
+            # Clean up the 4-bit model
+            remove_hook_from_module(model, recurse=True)
+            model.to("cpu")
+            del model
+            torch.cuda.empty_cache()
+            gc.collect()
+            
+            # Reload in full precision
+            model = reload_model_in_full_precision(
+                model_name,
+                tokenizer,
+                local_only,
+                model_class_name,
+            )
+        
         logger.info(f"Pruning model to {total_experts - n_experts_to_prune} experts...")
         prune(
             observer_data,

@@ -191,10 +191,16 @@ pip install 'bitsandbytes>=0.49.0'
 
 Cause: **Solar-Open remote code** uses `@check_model_inputs()` but your installed Transformers exposes it as `check_model_inputs(func)` in that version.
 
-Fix (in this repo): REAP applies a runtime shim in `src/reap/transformers_compat.py`.
-
+Fix options (try in order):
+1. Update core dependencies (proven fix per user testing)
+```bash
+cd /opt/reap
+source .venv/bin/activate
+pip install -U transformers accelerate
+```
+2. Apply repo-specific runtime shim (fallback)
+REAP applies a runtime shim in `src/reap/transformers_compat.py`.
 What you must do on a new pod:
-
 ```bash
 cd /opt/reap
 git pull
@@ -212,6 +218,54 @@ Move HF cache to `/workspace` (see env vars above) and prune old caches:
 
 ```bash
 du -sh ~/.cache/huggingface/* 2>/dev/null || true
+```
+
+#### E) Smoke Test Failures (attention mask/Triton errors)
+
+Cause:
+1. Tokenizer pad token = eos token (configuration issue)
+2. Missing Triton autotune directory (environment setup issue)
+
+These do NOT indicate poor model generation quality.
+
+Fix:
+```bash
+# Create missing Triton directory
+mkdir -p /root/.triton/autotune
+
+# Fix tokenizer pad token issue (persists across runs)
+cd /opt/reap
+source .venv/bin/activate
+python -c "from transformers import AutoTokenizer; tokenizer = AutoTokenizer.from_pretrained('upstage/Solar-Open-100B'); tokenizer.pad_token = tokenizer.eos_token; tokenizer.save_pretrained('/workspace/.cache/huggingface/tokenizers/fixed_solar_open')"
+```
+
+#### F) `TRANSFORMERS_CACHE` Deprecation Warning
+
+Cause: Using deprecated `TRANSFORMERS_CACHE` environment variable (will be removed in Transformers v5)
+
+Fix (permanent system-wide):
+```bash
+# Unset deprecated variable and set HF_HOME
+unset TRANSFORMERS_CACHE
+export HF_HOME=/workspace/.cache/huggingface
+export HUGGINGFACE_HUB_CACHE=$HF_HOME
+mkdir -p $HF_HOME
+# Save to bashrc for future sessions
+echo "unset TRANSFORMERS_CACHE
+export HF_HOME=/workspace/.cache/huggingface
+export HUGGINGFACE_HUB_CACHE=$HF_HOME" >> ~/.bashrc
+```
+
+#### G) Tokenizer Regex Pattern Error
+
+Cause: Incorrect regex pattern in tokenizer configuration (linked to Mistral model lineage)
+
+Fix (pruned model directory-specific):
+```bash
+# Run from your pruned model directory
+cd /opt/reap/artifacts/Solar-Open-100B/evol-codealpaca-v1/pruned_models/reap-seed_42-0.50
+# Fix regex + pad token and save to pruned model dir
+python -c "from transformers import AutoTokenizer; import os; tokenizer = AutoTokenizer.from_pretrained(os.getcwd(), fix_mistral_regex=True); tokenizer.pad_token = tokenizer.eos_token; tokenizer.save_pretrained(os.getcwd())"
 ```
 
 ---

@@ -618,6 +618,12 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     # load model
     local_only = _env_flag("REAP_LOCAL_FILES_ONLY", True)
+    # Fix TRANSFORMERS_CACHE deprecation warning
+    if os.getenv("TRANSFORMERS_CACHE") is not None:
+        logger.warning("TRANSFORMERS_CACHE is deprecated - use HF_HOME instead. Unsetting TRANSFORMERS_CACHE and setting HF_HOME to /workspace/.cache/huggingface")
+        os.unsetenv("TRANSFORMERS_CACHE")
+        os.environ["HF_HOME"] = os.getenv("HF_HOME", "/workspace/.cache/huggingface")
+        os.makedirs(os.environ["HF_HOME"], exist_ok=True)
     quantization_config = None
     if obs_args.load_in_4bit:
         logger.info("Loading model in 4-bit quantization to reduce VRAM during expert analysis.")

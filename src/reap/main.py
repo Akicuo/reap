@@ -37,7 +37,7 @@ from reap.args import (
 )
 from reap.merge import MergeMethod, MoEExpertMerger
 from reap.data import DATASET_REGISTRY
-from reap.observer import OBSERVER_CONFIG_REGISTRY, MoETransformerObserver
+from reap.observer import OBSERVER_CONFIG_REGISTRY, MoETransformerObserver, ensure_observer_config
 from reap.cluster import (
     get_penalty_vector,
     hierarchical_clustering,
@@ -49,7 +49,8 @@ from reap.cluster import (
     restricted_hierarchical_clustering,
     kmeans_clustering
 )
-from reap.model_util import get_moe, assert_merge, MODEL_ATTRS, patched_model_map, get_super_expert_indices
+from reap.model_util import get_moe, assert_merge, MODEL_ATTRS, patched_model_map, get_super_expert_indices, ensure_model_registered
+from reap.models.auto_patch import auto_patch_moe, patch_specific_model, needs_patching
 from reap.eval import run_evaluate
 from reap.cluster_plots import plot_cluster_analysis
 from reap.metrics import get_distance_fn
@@ -626,11 +627,32 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         device_map="auto",
-        torch_dtype="auto",
+        dtype="auto",
         trust_remote_code=True,
         local_files_only=local_only,
         quantization_config=quantization_config,
     )
+    
+    # --- AUTO-DETECTION AND PATCHING FOR UNSUPPORTED MODELS ---
+    model_class_name = model.__class__.__name__
+    
+    # 1. Ensure model is in MODEL_ATTRS (auto-register if needed)
+    if not ensure_model_registered(model):
+        logger.warning(f"Could not auto-register MODEL_ATTRS for {model_class_name}, merging may fail")
+    
+    # 2. Ensure model has observer config (auto-register if needed)
+    if not ensure_observer_config(model):
+        logger.warning(f"Could not auto-register observer config for {model_class_name}, merging may fail")
+    
+    # 3. Auto-patch MoE blocks for router_logits if needed
+    if needs_patching(model):
+        logger.info(f"Auto-patching MoE blocks for {model_class_name} to expose router_logits")
+        patched_count = patch_specific_model(model, model_class_name)
+        if patched_count == 0:
+            # Try generic patcher
+            patched_count = auto_patch_moe(model)
+        if patched_count == 0:
+            logger.warning(f"Could not patch any MoE blocks for {model_class_name}, observer may fail")
 
     # record activations or load previously recorded activations
     logger.info(

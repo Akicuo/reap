@@ -142,8 +142,130 @@ MODEL_ATTRS = {
 }
 
 
+def _infer_model_attrs_from_model(model) -> dict:
+    """
+    Infer MODEL_ATTRS configuration by inspecting a loaded model.
+    
+    This analyzes the model structure to determine:
+    - MoE block attribute name
+    - Projection names (gate, up, down)
+    - Whether experts are fused
+    - Router attribute name
+    - Config keys for num_experts and num_experts_per_tok
+    """
+    attrs = {
+        "moe_block": "mlp",
+        "gate_proj": "gate_proj",
+        "up_proj": "up_proj",
+        "down_proj": "down_proj",
+        "experts": "experts",
+        "fused": False,
+        "router": "gate",
+        "num_experts": "num_experts",
+        "num_experts_per_tok": "num_experts_per_tok",
+    }
+    
+    # Try to find a layer with MoE
+    if hasattr(model, 'model') and hasattr(model.model, 'layers'):
+        for layer in model.model.layers:
+            # Find MoE block attribute
+            for moe_attr in ["mlp", "block_sparse_moe", "moe", "feed_forward", "ffn"]:
+                if hasattr(layer, moe_attr):
+                    moe = getattr(layer, moe_attr)
+                    # Check if it has experts (MoE indicator)
+                    if hasattr(moe, 'experts'):
+                        attrs["moe_block"] = moe_attr
+                        
+                        # Check for fused experts
+                        if hasattr(moe.experts, 'gate_up_proj'):
+                            attrs["fused"] = True
+                            attrs["gate_proj"] = "gate_up_proj"
+                            attrs["up_proj"] = "gate_up_proj"
+                        elif hasattr(moe, 'experts') and len(list(moe.experts)) > 0:
+                            expert = list(moe.experts)[0]
+                            # Find projection names
+                            for proj_name in ["gate_proj", "w3", "wi_0"]:
+                                if hasattr(expert, proj_name):
+                                    attrs["gate_proj"] = proj_name
+                                    break
+                            for proj_name in ["up_proj", "w1", "wi_1", "fc1"]:
+                                if hasattr(expert, proj_name):
+                                    attrs["up_proj"] = proj_name
+                                    break
+                            for proj_name in ["down_proj", "w2", "wo", "fc2"]:
+                                if hasattr(expert, proj_name):
+                                    attrs["down_proj"] = proj_name
+                                    break
+                        
+                        # Find router attribute
+                        for router_name in ["gate", "router", "gating"]:
+                            if hasattr(moe, router_name):
+                                attrs["router"] = router_name
+                                break
+                        
+                        break
+            if attrs["moe_block"] != "mlp" or hasattr(getattr(layer, "mlp", None), "experts"):
+                break
+    
+    # Infer num_experts config key from model.config
+    if hasattr(model, 'config'):
+        config = model.config
+        for key in ["num_experts", "num_local_experts", "n_routed_experts", "moe_num_experts"]:
+            if hasattr(config, key):
+                attrs["num_experts"] = key
+                break
+        for key in ["num_experts_per_tok", "top_k", "moe_k", "num_selected_experts"]:
+            if hasattr(config, key):
+                attrs["num_experts_per_tok"] = key
+                break
+    
+    return attrs
+
+
+def ensure_model_registered(model) -> bool:
+    """
+    Ensure a model is registered in MODEL_ATTRS.
+    
+    If the model class is not in MODEL_ATTRS, this function will:
+    1. Analyze the model structure
+    2. Generate appropriate MODEL_ATTRS configuration
+    3. Inject it into MODEL_ATTRS at runtime
+    
+    Args:
+        model: The loaded model to check/register
+        
+    Returns:
+        True if model was already registered or successfully auto-registered,
+        False if registration failed.
+    """
+    model_class = model.__class__.__name__
+    
+    if model_class in MODEL_ATTRS:
+        logger.debug(f"Model {model_class} already in MODEL_ATTRS")
+        return True
+    
+    logger.info(f"Model {model_class} not in MODEL_ATTRS, attempting auto-registration...")
+    
+    try:
+        # Infer attributes from the loaded model
+        inferred_attrs = _infer_model_attrs_from_model(model)
+        
+        # Register the model
+        MODEL_ATTRS[model_class] = inferred_attrs
+        
+        logger.info(f"Auto-registered MODEL_ATTRS for {model_class}: {inferred_attrs}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to auto-register MODEL_ATTRS for {model_class}: {e}")
+        return False
+
+
 def get_moe(model, layer):
-    moe_attr_name = MODEL_ATTRS.get(model.__class__.__name__)["moe_block"]
+    model_class = model.__class__.__name__
+    if model_class not in MODEL_ATTRS:
+        ensure_model_registered(model)
+    moe_attr_name = MODEL_ATTRS.get(model_class, {}).get("moe_block", "mlp")
     return getattr(model.model.layers[layer], moe_attr_name)
 
 

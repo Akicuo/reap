@@ -168,35 +168,49 @@ class ModelAnalysis:
         }
     
     def _infer_moe_class_name(self) -> str | None:
-        """Attempt to infer the MoE block class name from model type."""
+        """
+        Attempt to infer the MoE block class name from model type.
+        
+        IMPORTANT: This should return the MoE BLOCK class (e.g., SolarOpenMoE),
+        NOT the top-level model class (e.g., SolarOpenForCausalLM).
+        The observer hooks need to attach to MoE blocks within decoder layers,
+        which have layer numbers in their module paths.
+        """
         model_type = self.config.get("model_type", "").lower()
         architectures = self.config.get("architectures", [])
         
-        # Common patterns
+        # Known MoE block class mappings
         type_to_class = {
             "qwen3_moe": "Qwen3MoeSparseMoeBlock",
             "qwen2_moe": "Qwen2MoeSparseMoeBlock",
             "mixtral": "MixtralSparseMoeBlock",
             "deepseek_v2": "DeepseekV2MoE",
             "llama4": "Llama4TextMoe",
+            "solar_open": "SolarOpenMoE",
         }
         
         for key, cls in type_to_class.items():
             if key in model_type:
                 return cls
         
-        # Fallback: generate from architecture name
+        # Generate MoE block class name from architecture
+        # Pattern: <ModelName>ForCausalLM -> <ModelName>MoE or <ModelName>SparseMoeBlock
         if architectures:
             arch = architectures[0]
-            if "moe" in arch.lower() and "ForCausalLM" in arch:
-                return f"{arch.replace('ForCausalLM', '')}SparseMoeBlock"
-            # If we can't infer a block, at least return the model class so users can refine
-            return arch
-
-        # Last resort: build a class-like string from model_type
+            # Extract base name (remove ForCausalLM, ForConditionalGeneration, etc.)
+            base_name = re.sub(r"For(CausalLM|ConditionalGeneration|SequenceClassification)$", "", arch)
+            
+            if base_name:
+                # Try common MoE block naming patterns (in order of likelihood)
+                # Most models use <BaseName>MoE or <BaseName>SparseMoeBlock
+                return f"{base_name}MoE"
+        
+        # Last resort: build from model_type + MoE suffix
         if model_type:
+            # Convert model_type like "solar_open" to "SolarOpenMoE"
             cleaned = "".join(part.capitalize() for part in re.split(r"[_\\-]", model_type) if part)
-            return cleaned or None
+            if cleaned:
+                return f"{cleaned}MoE"
         
         return None
 
@@ -659,11 +673,15 @@ def _format_model_attrs_entry(key: str, attrs: dict[str, Any]) -> str:
 
 
 def _format_observer_class(class_name: str, cfg: dict[str, Any]) -> str:
+    moe_class = cfg['module_class_name_to_hook_regex']
     return textwrap.dedent(
         f"""
+        # NOTE: Verify module_class_name_to_hook_regex matches the actual MoE block class in the model.
+        # To find the correct class, run: grep "^class " <model_cache_path>/modeling_*.py
+        # The hook class should be the MoE block (e.g., *MoE, *SparseMoeBlock), NOT the top-level model class.
         @dataclass
         class {class_name}(MoETransformerObserverConfig):
-            module_class_name_to_hook_regex: Optional[str] = "{cfg['module_class_name_to_hook_regex']}"
+            module_class_name_to_hook_regex: Optional[str] = "{moe_class}"
             num_experts_attr_name: str = "{cfg['num_experts_attr_name']}"
             top_k_attr_name: str = "{cfg['top_k_attr_name']}"
             fused_experts: bool = {cfg['fused_experts']}
@@ -721,6 +739,11 @@ def _add_observer_entry(model_key: str, cfg: dict[str, Any]) -> bool:
 
     target_file.write_text(text)
     logger.info("Added OBSERVER_CONFIG_REGISTRY entry for %s", model_key)
+    logger.warning(
+        "IMPORTANT: Verify that module_class_name_to_hook_regex='%s' matches the actual MoE block class. "
+        "Run: grep '^class ' <model_cache>/modeling_*.py to find the correct class name (e.g., *MoE, *SparseMoeBlock).",
+        cfg.get("module_class_name_to_hook_regex", "Unknown"),
+    )
     return True
 
 
@@ -755,6 +778,143 @@ def analyze_model(model_path: str | pathlib.Path) -> ModelAnalysis:
     """
     analyzer = ModelAnalyzer(model_path)
     return analyzer.analyze()
+
+
+def analyze_loaded_model(model) -> dict[str, Any]:
+    """
+    Analyze an already-loaded model at runtime to infer configuration.
+    
+    This is useful when you have a model object and need to determine
+    its MoE structure without re-loading from disk.
+    
+    Args:
+        model: A loaded HuggingFace model object
+        
+    Returns:
+        Dictionary containing:
+        - model_attrs: Suggested MODEL_ATTRS entry
+        - observer_config: Suggested observer config
+        - moe_info: Information about MoE blocks found
+    """
+    import torch.nn as nn
+    
+    model_class = model.__class__.__name__
+    config = getattr(model, 'config', None)
+    
+    # Initialize results
+    result = {
+        "model_class": model_class,
+        "model_attrs": {
+            "moe_block": "mlp",
+            "gate_proj": "gate_proj",
+            "up_proj": "up_proj",
+            "down_proj": "down_proj",
+            "experts": "experts",
+            "fused": False,
+            "router": "gate",
+            "num_experts": "num_experts",
+            "num_experts_per_tok": "num_experts_per_tok",
+        },
+        "observer_config": {
+            "module_class_name_to_hook_regex": None,
+            "num_experts_attr_name": "num_experts",
+            "top_k_attr_name": "num_experts_per_tok",
+            "fused_experts": False,
+        },
+        "moe_info": {
+            "moe_block_class": None,
+            "num_moe_layers": 0,
+            "num_experts": 0,
+            "num_experts_per_tok": 0,
+        }
+    }
+    
+    # Analyze model structure
+    moe_patterns = ["MoE", "SparseMoeBlock", "MoeBlock", "MoeMLP", "ExpertLayer"]
+    moe_block_classes = set()
+    moe_layer_count = 0
+    
+    if hasattr(model, 'model') and hasattr(model.model, 'layers'):
+        for layer in model.model.layers:
+            for attr_name in ["mlp", "block_sparse_moe", "moe", "feed_forward", "ffn"]:
+                if hasattr(layer, attr_name):
+                    moe = getattr(layer, attr_name)
+                    class_name = moe.__class__.__name__
+                    
+                    # Check if it's an MoE block
+                    is_moe = (
+                        any(p.lower() in class_name.lower() for p in moe_patterns) or
+                        hasattr(moe, 'experts')
+                    )
+                    
+                    if is_moe:
+                        moe_block_classes.add(class_name)
+                        moe_layer_count += 1
+                        result["model_attrs"]["moe_block"] = attr_name
+                        result["observer_config"]["module_class_name_to_hook_regex"] = class_name
+                        
+                        # Check for fused experts
+                        if hasattr(moe, 'experts') and hasattr(moe.experts, 'gate_up_proj'):
+                            result["model_attrs"]["fused"] = True
+                            result["model_attrs"]["gate_proj"] = "gate_up_proj"
+                            result["model_attrs"]["up_proj"] = "gate_up_proj"
+                            result["observer_config"]["fused_experts"] = True
+                        elif hasattr(moe, 'experts') and isinstance(moe.experts, nn.ModuleList) and len(moe.experts) > 0:
+                            expert = moe.experts[0]
+                            # Find projection names
+                            for proj_name in ["gate_proj", "w3", "wi_0"]:
+                                if hasattr(expert, proj_name):
+                                    result["model_attrs"]["gate_proj"] = proj_name
+                                    break
+                            for proj_name in ["up_proj", "w1", "wi_1", "fc1"]:
+                                if hasattr(expert, proj_name):
+                                    result["model_attrs"]["up_proj"] = proj_name
+                                    break
+                            for proj_name in ["down_proj", "w2", "wo", "fc2"]:
+                                if hasattr(expert, proj_name):
+                                    result["model_attrs"]["down_proj"] = proj_name
+                                    break
+                        
+                        # Find router
+                        for router_name in ["gate", "router", "gating"]:
+                            if hasattr(moe, router_name):
+                                result["model_attrs"]["router"] = router_name
+                                break
+                        
+                        # Get num_experts from module
+                        if hasattr(moe, 'experts') and isinstance(moe.experts, nn.ModuleList):
+                            result["moe_info"]["num_experts"] = len(moe.experts)
+                        
+                        break
+    
+    # Update moe_info
+    result["moe_info"]["moe_block_class"] = list(moe_block_classes)[0] if moe_block_classes else None
+    result["moe_info"]["num_moe_layers"] = moe_layer_count
+    
+    # Infer config attribute names
+    if config:
+        # num_experts
+        for key in ["num_experts", "num_local_experts", "n_routed_experts", "moe_num_experts"]:
+            if hasattr(config, key):
+                result["model_attrs"]["num_experts"] = key
+                result["observer_config"]["num_experts_attr_name"] = f"config.{key}"
+                val = getattr(config, key)
+                if isinstance(val, int):
+                    result["moe_info"]["num_experts"] = val
+                break
+        
+        # num_experts_per_tok
+        for key in ["num_experts_per_tok", "top_k", "moe_k", "num_selected_experts"]:
+            if hasattr(config, key):
+                result["model_attrs"]["num_experts_per_tok"] = key
+                result["observer_config"]["top_k_attr_name"] = f"config.{key}"
+                val = getattr(config, key)
+                if isinstance(val, int):
+                    result["moe_info"]["num_experts_per_tok"] = val
+                break
+    
+    logger.info(f"Runtime analysis of {model_class}: found {moe_layer_count} MoE layers")
+    return result
 
 
 def print_analysis(model_path: str | pathlib.Path) -> None:

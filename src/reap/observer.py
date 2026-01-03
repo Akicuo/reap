@@ -339,28 +339,78 @@ class MoETransformerObserver(BaseTransformerObserver):
 
         @torch.no_grad()
         def _hook_fn(module, args, output):
-            if not len(output) >= 2:
-                raise ValueError(
-                    f"Expected output of module {module.__class__.__name__} at layer "
-                    f"{layer_number} to be a tuple of at least length 2, got {len(output)}."
-                )
             input = args[0]  # (batch_size, seq_len, hidden_dim)
             device = input.device
-            if layer_number not in self.state:
-                self.state[layer_number] = self._initialize_state(output, num_experts)
             batch_size, sequence_length, hidden_dim = input.shape
             flat_input = input.view(-1, hidden_dim)  # total_seq_len, hidden
+            
+            # --- ROUTER LOGITS RETRIEVAL WITH FALLBACK CHAIN ---
+            router_logits = None
+            
+            # Fallback 1: Check for _last_router_logits attribute (auto-patched models)
+            if hasattr(module, '_last_router_logits') and module._last_router_logits is not None:
+                router_logits = module._last_router_logits
+                # Clear after retrieval to avoid stale data
+                module._last_router_logits = None
+            
+            # Fallback 2: Check if output is a tuple with router_logits
+            elif isinstance(output, tuple) and len(output) >= 2:
+                # Last element is typically router_logits
+                router_logits = output[-1]
+            
+            # Fallback 3: Check for router_logits attribute on module
+            elif hasattr(module, 'router_logits'):
+                router_logits = module.router_logits
+            
+            # Fallback 4: Compute from gate/router weights if available
+            elif hasattr(module, 'gate') and hasattr(module.gate, 'weight'):
+                try:
+                    gate_weight = module.gate.weight
+                    router_logits = F.linear(
+                        flat_input.to(gate_weight.dtype),
+                        gate_weight
+                    )
+                except Exception:
+                    pass
+            elif hasattr(module, 'router') and hasattr(module.router, 'weight'):
+                try:
+                    router_weight = module.router.weight
+                    router_logits = F.linear(
+                        flat_input.to(router_weight.dtype),
+                        router_weight
+                    )
+                except Exception:
+                    pass
+            
+            # Fallback 5: Create placeholder router_logits if all else fails
+            if router_logits is None:
+                logger.warning(
+                    f"Could not retrieve router_logits for {module.__class__.__name__} at layer {layer_number}. "
+                    "Creating placeholder. Some metrics may be inaccurate."
+                )
+                router_logits = torch.zeros(
+                    flat_input.shape[0], num_experts,
+                    device=device, dtype=flat_input.dtype
+                )
+            
+            # Ensure router_logits is on the right device and has right shape
+            if router_logits.device != device:
+                router_logits = router_logits.to(device)
+            
+            # Get selected experts from router_logits
+            _, selected_experts = torch.topk(router_logits, top_k, dim=-1)
+            
+            if layer_number not in self.state:
+                self.state[layer_number] = self._initialize_state(output, num_experts)
+            
             activations = torch.zeros((num_experts, *flat_input.shape), device=device)
 
             if self.hook_config.fused_experts:
-                _, router_scores = output  # (num_experts, total_tokens)
-                router_logits = module.router(flat_input)  # (total_tokens, num_experts)
-                _, selected_experts = torch.topk(router_logits, top_k, dim=-1)
-                selected_experts = selected_experts.to(device)
+                # Fused experts path
                 router_indices = (
                     torch.arange(batch_size * sequence_length, device=device)
                     .view(1, -1)
-                    .expand(router_scores.size(0), -1)
+                    .expand(num_experts, -1)
                 )
                 router_indices = router_indices.reshape(-1, 1).expand(-1, hidden_dim)
                 routed_in = torch.gather(
@@ -368,16 +418,11 @@ class MoETransformerObserver(BaseTransformerObserver):
                     dim=0,
                     index=router_indices,
                 ).to(device)
-                # we do not apply router_scores
                 # record unweighted activations for all experts
                 routed_out = module.experts(routed_in)
                 activations = routed_out.view(num_experts, *flat_input.shape)
 
             else:  # loop based MoE execution
-                # ernie returns combined_output, combine_weights, router_loss, gate_logits
-                *_, router_logits = output  # (total_tokens, num_experts)
-                _, selected_experts = torch.topk(router_logits, top_k, dim=-1)
-                # selected_experts = selected_experts.to(device)
                 for idx, expert in enumerate(module.experts):
                     activations[idx] = expert(flat_input).to(
                         device
@@ -616,9 +661,9 @@ class Glm44MoEObserverHookConfig(MoETransformerObserverConfig):
 
 @dataclass
 class SolarOpenForCausalLMObserverHookConfig(MoETransformerObserverConfig):
-    module_class_name_to_hook_regex: Optional[str] = "SolarOpenForCausalLM"
-    num_experts_attr_name: str = "n_routed_experts"
-    top_k_attr_name: str = "num_experts_per_tok"
+    module_class_name_to_hook_regex: Optional[str] = "SolarOpenMoE"
+    num_experts_attr_name: str = "config.n_routed_experts"
+    top_k_attr_name: str = "config.num_experts_per_tok"
     fused_experts: bool = False
 
 @dataclass
@@ -627,6 +672,152 @@ class VaetkiForCausalLMObserverHookConfig(MoETransformerObserverConfig):
     num_experts_attr_name: str = "n_routed_experts"
     top_k_attr_name: str = "num_experts_per_tok"
     fused_experts: bool = False
+
+
+def _infer_moe_class_name(model) -> str | None:
+    """Infer the MoE block class name by inspecting the model structure."""
+    moe_patterns = ["MoE", "SparseMoeBlock", "MoeBlock", "MoeMLP", "ExpertLayer"]
+    
+    if hasattr(model, 'model') and hasattr(model.model, 'layers'):
+        for layer in model.model.layers:
+            for attr_name in ["mlp", "block_sparse_moe", "moe", "feed_forward", "ffn"]:
+                if hasattr(layer, attr_name):
+                    module = getattr(layer, attr_name)
+                    class_name = module.__class__.__name__
+                    # Check if it looks like an MoE block
+                    if any(p.lower() in class_name.lower() for p in moe_patterns):
+                        return class_name
+                    # Check if it has experts attribute (MoE indicator)
+                    if hasattr(module, 'experts'):
+                        return class_name
+    return None
+
+
+def _infer_num_experts_attr(model) -> str:
+    """Infer the attribute path for num_experts on MoE blocks."""
+    if hasattr(model, 'config'):
+        config = model.config
+        # Check config-level attributes
+        for key in ["num_experts", "num_local_experts", "n_routed_experts", "moe_num_experts"]:
+            if hasattr(config, key):
+                return f"config.{key}"
+    
+    # Check MoE module attributes
+    if hasattr(model, 'model') and hasattr(model.model, 'layers'):
+        for layer in model.model.layers:
+            for attr_name in ["mlp", "block_sparse_moe", "moe", "feed_forward"]:
+                if hasattr(layer, attr_name):
+                    moe = getattr(layer, attr_name)
+                    for key in ["num_experts", "num_local_experts", "n_routed_experts", "experts_per_rank"]:
+                        if hasattr(moe, key):
+                            return key
+                    if hasattr(moe, 'config'):
+                        for key in ["num_experts", "num_local_experts", "n_routed_experts"]:
+                            if hasattr(moe.config, key):
+                                return f"config.{key}"
+    
+    return "num_experts"
+
+
+def _infer_top_k_attr(model) -> str:
+    """Infer the attribute path for num_experts_per_tok on MoE blocks."""
+    if hasattr(model, 'config'):
+        config = model.config
+        for key in ["num_experts_per_tok", "top_k", "moe_k", "num_selected_experts", "k"]:
+            if hasattr(config, key):
+                return f"config.{key}"
+    
+    # Check MoE module attributes
+    if hasattr(model, 'model') and hasattr(model.model, 'layers'):
+        for layer in model.model.layers:
+            for attr_name in ["mlp", "block_sparse_moe", "moe", "feed_forward"]:
+                if hasattr(layer, attr_name):
+                    moe = getattr(layer, attr_name)
+                    for key in ["top_k", "num_experts_per_tok", "k"]:
+                        if hasattr(moe, key):
+                            return key
+                    if hasattr(moe, 'config'):
+                        for key in ["num_experts_per_tok", "top_k", "k"]:
+                            if hasattr(moe.config, key):
+                                return f"config.{key}"
+    
+    return "num_experts_per_tok"
+
+
+def _detect_fused_experts(model) -> bool:
+    """Detect if the model uses fused expert implementation."""
+    if hasattr(model, 'model') and hasattr(model.model, 'layers'):
+        for layer in model.model.layers:
+            for attr_name in ["mlp", "block_sparse_moe", "moe", "feed_forward"]:
+                if hasattr(layer, attr_name):
+                    moe = getattr(layer, attr_name)
+                    if hasattr(moe, 'experts'):
+                        # Fused experts have gate_up_proj as a single tensor
+                        if hasattr(moe.experts, 'gate_up_proj'):
+                            return True
+    return False
+
+
+def ensure_observer_config(model) -> bool:
+    """
+    Ensure a model has an observer config registered.
+    
+    If the model class is not in OBSERVER_CONFIG_REGISTRY, this function will:
+    1. Analyze the model structure to infer MoE block class name
+    2. Infer num_experts and top_k attribute paths
+    3. Create and register a dynamic observer config class
+    
+    Args:
+        model: The loaded model to check/register
+        
+    Returns:
+        True if model was already registered or successfully auto-registered,
+        False if registration failed.
+    """
+    model_class = model.__class__.__name__
+    
+    if model_class in OBSERVER_CONFIG_REGISTRY:
+        logger.debug(f"Model {model_class} already in OBSERVER_CONFIG_REGISTRY")
+        return True
+    
+    logger.info(f"Model {model_class} not in OBSERVER_CONFIG_REGISTRY, attempting auto-registration...")
+    
+    try:
+        # Infer MoE block class name
+        moe_class_name = _infer_moe_class_name(model)
+        if moe_class_name is None:
+            # Fallback: use model class name with MoE suffix
+            base_name = model_class.replace("ForCausalLM", "").replace("ForConditionalGeneration", "")
+            moe_class_name = f"{base_name}MoE"
+            logger.warning(f"Could not detect MoE class, using fallback: {moe_class_name}")
+        
+        # Infer attribute paths
+        num_experts_attr = _infer_num_experts_attr(model)
+        top_k_attr = _infer_top_k_attr(model)
+        is_fused = _detect_fused_experts(model)
+        
+        # Create dynamic config class
+        @dataclass
+        class DynamicObserverConfig(MoETransformerObserverConfig):
+            module_class_name_to_hook_regex: Optional[str] = moe_class_name
+            num_experts_attr_name: str = num_experts_attr
+            top_k_attr_name: str = top_k_attr
+            fused_experts: bool = is_fused
+        
+        # Register the config
+        OBSERVER_CONFIG_REGISTRY[model_class] = DynamicObserverConfig
+        
+        logger.info(
+            f"Auto-registered observer config for {model_class}: "
+            f"moe_class={moe_class_name}, num_experts_attr={num_experts_attr}, "
+            f"top_k_attr={top_k_attr}, fused={is_fused}"
+        )
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to auto-register observer config for {model_class}: {e}")
+        return False
+
 
 OBSERVER_CONFIG_REGISTRY = {
     "Qwen3MoeForCausalLM": Qwen3MoEObserverHookConfig,

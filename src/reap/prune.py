@@ -263,9 +263,9 @@ def main():
 
     # get local patched model if req'd
     model_name = patched_model_map(model_args.model_name)
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    # Apply compat patches before importing any trust_remote_code modules
+    # Apply compat patches BEFORE importing any trust_remote_code modules
     apply_transformers_compat_patches()
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     # load model
     local_only = _env_flag("REAP_LOCAL_FILES_ONLY", True)
     quantization_config = None

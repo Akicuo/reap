@@ -804,6 +804,14 @@ def main():
             )
         
         logger.info(f"Pruning model to {total_experts - n_experts_to_prune} experts...")
+        
+        # --- FIX: Ensure model registration and observer config before pruning ---
+        # This handles cases where reload_model_in_full_precision wasn't called
+        # or if the model state needs refreshing
+        model_class_name = model.__class__.__name__
+        ensure_model_registered(model)
+        ensure_observer_config(model)
+        
         prune(
             observer_data,
             model,

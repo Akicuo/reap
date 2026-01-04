@@ -1,19 +1,3 @@
-"""Convert datasets to transformers BatchEncoded or vLLM TokensPrompt formats.
-
-We follow the OpenAI spec for conversational datasets.
-
-ie..,
-messages = [
-    {"role": "system", "content": "You are AGI"},
-    {"role": "user", "content": "Hello"},
-    {"role": "assistant", "content": "What is my purpose?"},
-]
-
-Includes the ability to select from specific categories within the dataset and convert
-the dataset into either a language modelling dataset with attention applied to every
-token or a prompt-completion dataset for training on completions only with SFTTrainer.
-"""
-
 from __future__ import annotations
 from abc import ABC, abstractmethod
 import random
@@ -421,6 +405,57 @@ class WritingPromptsChatDataset(ChatDatasetProcessor):
             ],
         }
 
+class XlamFunctionCallingChatDataset(ChatDatasetProcessor):
+    """Dataset for Salesforce/xlam-function-calling-60k."""
+    category_field: str = None
+
+    @staticmethod
+    def _map_fn(sample: dict[str, any]) -> dict[str, any]:
+        # Contains 'query', 'answers' (or 'output'), 'tools'
+        # The sharegpt format usually has conversations
+        # If it's the raw dataset from HuggingFace, it often has 'query' and 'answer'
+        # Adjusting based on typical structure for function calling datasets
+        # Assuming the ShareGPT version has 'conversations'
+        if "conversations" in sample:
+             return {"messages": sample["conversations"]}
+        
+        # Fallback for raw format if not ShareGPT
+        messages = [{"role": "user", "content": sample.get("query", "")}]
+        if "tools" in sample:
+            messages[0]["content"] += f"\n\nAvailable tools: {sample['tools']}"
+        if "answers" in sample:
+             messages.append({"role": "assistant", "content": sample["answers"]})
+        
+        return {"messages": messages}
+
+class SweSmithTrajectoriesChatDataset(ChatDatasetProcessor):
+    """Dataset for SWE-bench/SWE-smith-trajectories."""
+    category_field: str = None
+
+    @staticmethod
+    def _map_fn(sample: dict[str, any]) -> dict[str, any]:
+         # Typically contains trajectory information
+         # We need to extract the conversation history or relevant parts
+         # Assuming a structure where we can extract prompt and response or conversation
+         
+         # Placeholder mapping based on typical trajectory datasets
+         # Often has 'history' or 'turns'
+         messages = []
+         if "history" in sample and isinstance(sample["history"], list):
+             for turn in sample["history"]:
+                 role = turn.get("role", "user")
+                 content = turn.get("content", "")
+                 messages.append({"role": role, "content": content})
+         else:
+             # Fallback if structure is different, e.g. just a text field
+             # Using a generic system prompt for context
+             messages.append({"role": "system", "content": "You are a software engineering assistant."})
+             if "problem_statement" in sample:
+                 messages.append({"role": "user", "content": sample["problem_statement"]})
+             if "patch" in sample:
+                 messages.append({"role": "assistant", "content": f"Here is the patch:\n{sample['patch']}"})
+                 
+         return {"messages": messages}
 
 
 DATASET_REGISTRY: dict[str, BaseDatasetProcessor] = {
@@ -432,4 +467,6 @@ DATASET_REGISTRY: dict[str, BaseDatasetProcessor] = {
     "theblackcat102/evol-codealpaca-v1": CodeAlpacaChatDataset,
     "euclaise/WritingPrompts_curated": WritingPromptsChatDataset,
     "allenai/tulu-3-sft-personas-math": PersonasMathChatDataset,
+    "Salesforce/xlam-function-calling-60k": XlamFunctionCallingChatDataset,
+    "SWE-bench/SWE-smith-trajectories": SweSmithTrajectoriesChatDataset,
 }

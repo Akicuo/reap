@@ -83,6 +83,8 @@ class DatasetArgs:
                 "theblackcat102/evol-codealpaca-v1",
                 "euclaise/WritingPrompts_curated",
                 "allenai/tulu-3-sft-personas-math",
+                "Salesforce/xlam-function-calling-60k",
+                "SWE-bench/SWE-smith-trajectories",
                 "combined"
             ],
         },

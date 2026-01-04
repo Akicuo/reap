@@ -18,7 +18,7 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
-from datasets import load_dataset
+from datasets import load_dataset, Dataset, DatasetDict
 from transformers import AutoTokenizer, AutoModelForCausalLM, HfArgumentParser, BitsAndBytesConfig
 
 from accelerate.utils import set_seed
@@ -110,142 +110,293 @@ def _env_flag(name: str, default: bool) -> bool:
     return val.strip().lower() not in ("0", "false", "no", "off", "")
 
 
+def create_combined_dataset(samples_per_dataset: int = 50):
+    """
+    Create a combined dataset from the three coding agent datasets.
+    Returns a combined dataset with 50 samples from each dataset.
+    """
+    coding_datasets = [
+        "theblackcat102/evol-codealpaca-v1",
+        "Salesforce/xlam-function-calling-60k", 
+        "SWE-bench/SWE-smith-trajectories"
+    ]
+    
+    combined_samples = []
+    
+    for dataset_name in coding_datasets:
+        logger.info(f"Loading {samples_per_dataset} samples from {dataset_name}...")
+        try:
+            if dataset_name == "allenai/c4":
+                file_url = "https://huggingface.co/datasets/allenai/c4/resolve/main/en/c4-train.00000-of-01024.json.gz"
+                raw_ds = load_dataset(
+                    "json", data_files={"train": file_url}, split="train", streaming=False
+                )
+            else:
+                raw_ds = load_dataset(dataset_name, split="train")
+            
+            # Sample the required number of samples
+            if len(raw_ds) > samples_per_dataset:
+                # Random sampling without replacement
+                indices = torch.randperm(len(raw_ds))[:samples_per_dataset].tolist()
+                sampled_ds = raw_ds.select(indices)
+            else:
+                sampled_ds = raw_ds
+                logger.warning(f"Dataset {dataset_name} has only {len(raw_ds)} samples, using all of them.")
+            
+            # Add dataset identifier
+            dataset_with_source = sampled_ds.map(
+                lambda example, idx: {"source_dataset": dataset_name, **example},
+                with_indices=True,
+                desc=f"Adding source info to {dataset_name}"
+            )
+            
+            combined_samples.extend(dataset_with_source)
+            
+        except Exception as e:
+            logger.error(f"Failed to load dataset '{dataset_name}': {e}")
+            raise RuntimeError(f"Failed to load dataset '{dataset_name}': {e}")
+    
+    # Create a combined dataset
+    combined_dataset = Dataset.from_list(combined_samples)
+    logger.info(f"Created combined dataset with {len(combined_dataset)} total samples")
+    
+    return combined_dataset
+
+
 def record_activations(
     model, tokenizer, reap_args, model_args, ds_args, obs_args, results_dir
 ):
     if ds_args.dataset_name == "combined":
-        # just return the combined data
+        # Check if combined data already exists
         cat_dir = results_dir / "all"
         f_name = cat_dir / obs_args.output_file_name
         if f_name.exists():
+            logger.info(f"Loading pre-recorded combined data from {f_name}")
             return torch.load(f_name, weights_only=False)
         else:
-            raise RuntimeError(
-                f"Combined dataset requested but no pre-recorded data found at {f_name}"
+            logger.info("Creating combined dataset from three coding agent datasets...")
+            # Create combined dataset
+            combined_dataset = create_combined_dataset(samples_per_dataset=50)
+            
+            # Use the CodeAlpacaChatDataset processor as the base since all are chat datasets
+            from reap.data import CodeAlpacaChatDataset
+            processor = CodeAlpacaChatDataset(
+                dataset=combined_dataset,
+                tokenizer=tokenizer,
+                max_input_len=obs_args.model_max_length,
+                split=None,
+                split_by_category=True,  # This will use 'source_dataset' as category
+                return_vllm_tokens_prompt=obs_args.return_vllm_tokens_prompt,
+                truncate=obs_args.truncate,
             )
-    try:
-        if ds_args.dataset_name == "allenai/c4":
-            file_url = "https://huggingface.co/datasets/allenai/c4/resolve/main/en/c4-train.00000-of-01024.json.gz"
-            c4_single_file_dataset = load_dataset(
-                "json", data_files={"train": file_url}, split="train", streaming=False
+            
+            category_data_batches = processor.get_processed_dataset(
+                samples_per_category=50,  # This will get 50 from each category (source dataset)
             )
-            raw_ds = c4_single_file_dataset
-        else:
-            raw_ds = load_dataset(ds_args.dataset_name, split=ds_args.split)
-    except Exception as e:
-        raise RuntimeError(f"Failed to load dataset '{ds_args.dataset_name}': {e}")
-
-    # load dataset processor
-    proc_cls = DATASET_REGISTRY.get(ds_args.dataset_name)
-    if proc_cls is None:
-        raise ValueError(
-            f"No DatasetProcessor registered for '{ds_args.dataset_name}'. "
-            f"Supported: {list(DATASET_REGISTRY.keys())}"
-        )
-
-    # init processor & process dataset
-    processor = proc_cls(
-        dataset=raw_ds,
-        tokenizer=tokenizer,
-        max_input_len=obs_args.model_max_length,
-        split=ds_args.split,
-        split_by_category=obs_args.split_by_category,
-        return_vllm_tokens_prompt=obs_args.return_vllm_tokens_prompt,
-        truncate=obs_args.truncate,
-    )
-    category_data_batches = processor.get_processed_dataset(
-        samples_per_category=obs_args.samples_per_category,
-    )
-    logger.info(
-        "Loaded and processed data for categories: %s",
-        str(list(category_data_batches.keys())),
-    )
-
-    # load observer and hook model
-    try:
-        renormalize_router_weights = getattr(model.config, "norm_topk_prob", False) and obs_args.renormalize_router_weights
-        if renormalize_router_weights:
-            logger.info("Renormalizing topk router weights to sum to 1.")
-        observer_config = OBSERVER_CONFIG_REGISTRY[model.__class__.__name__](
-            # distance_measure=obs_args.distance_measure,
-            distance_measure='cosine',
-            renormalize_router_weights=renormalize_router_weights,
-            record_pruning_metrics_only=obs_args.record_pruning_metrics_only,
-        )
-    except KeyError:
-        raise ValueError(
-            f"No observer configuration registered for model '{model.__class__.__name__}'. "
-            f"Supported: {list(OBSERVER_CONFIG_REGISTRY.keys())}"
-        )
-    observer = MoETransformerObserver(
-        model=model,
-        hook_config=observer_config,
-    )
-
-    if reap_args.profile:
-        # profile at max len
-        with torch.no_grad():
+            
+            logger.info(
+                "Loaded and processed combined data for categories: %s",
+                str(list(category_data_batches.keys())),
+            )
+            
+            # Load observer and hook model
             try:
-                model_max_length = obs_args.model_max_length
-                if model_max_length is None:
-                    model_max_length = tokenizer.model_max_length
-                logger.info(f"Profiling at model max length: {model_max_length}.")
-                s = "hello " * model_max_length
-                tokenized = tokenizer(
-                    [s],
-                    return_tensors="pt",
-                    truncation=True,
-                    max_length=model_max_length,
+                renormalize_router_weights = getattr(model.config, "norm_topk_prob", False) and obs_args.renormalize_router_weights
+                if renormalize_router_weights:
+                    logger.info("Renormalizing topk router weights to sum to 1.")
+                observer_config = OBSERVER_CONFIG_REGISTRY[model.__class__.__name__](
+                    distance_measure='cosine',
+                    renormalize_router_weights=renormalize_router_weights,
+                    record_pruning_metrics_only=obs_args.record_pruning_metrics_only,
                 )
-                tokenized = {k: v.to(model.device) for k, v in tokenized.items()}
-                for _ in range(2):
-                    _ = model(**tokenized)
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to run model with max input length {model_max_length}: {e}"
+            except KeyError:
+                raise ValueError(
+                    f"No observer configuration registered for model '{model.__class__.__name__}'. "
+                    f"Supported: {list(OBSERVER_CONFIG_REGISTRY.keys())}"
                 )
-        logger.info(
-            f"Model {model_args.model_name} successfully loaded and profiled at max length {model_max_length}."
-        )
-        observer.reset()
+            observer = MoETransformerObserver(
+                model=model,
+                hook_config=observer_config,
+            )
 
-    # run samples over model and save observer state
-    with torch.no_grad():
-        for category, cat_data in category_data_batches.items():
-            logger.info(f"Processing category: {category}...")
-            cat_dir = results_dir / str_to_directory_name(category)
+            if reap_args.profile:
+                # profile at max len
+                with torch.no_grad():
+                    try:
+                        model_max_length = obs_args.model_max_length
+                        if model_max_length is None:
+                            model_max_length = tokenizer.model_max_length
+                        logger.info(f"Profiling at model max length: {model_max_length}.")
+                        s = "hello " * model_max_length
+                        tokenized = tokenizer(
+                            [s],
+                            return_tensors="pt",
+                            truncation=True,
+                            max_length=model_max_length,
+                        )
+                        tokenized = {k: v.to(model.device) for k, v in tokenized.items()}
+                        for _ in range(2):
+                            _ = model(**tokenized)
+                    except Exception as e:
+                        raise RuntimeError(
+                            f"Failed to run model with max input length {model_max_length}: {e}"
+                        )
+                logger.info(
+                    f"Model {model_args.model_name} successfully loaded and profiled at max length {model_max_length}."
+                )
+                observer.reset()
+
+            # Run samples over model and save observer state
+            cat_dir = results_dir / "all"
             cat_dir.mkdir(parents=True, exist_ok=True)
             f_name = cat_dir / obs_args.output_file_name
-            if f_name.exists() and not obs_args.overwrite_observations:
-                logger.info(
-                    f"Category '{category}' previously processed. Skipping to next category..."
-                )
-                continue
+            
             try:
-                logger.info("No previous data found @ %s", f_name)
-                for sample in tqdm(cat_data, desc=f"Processing {category} samples"):
-                    model(sample.to(model.device))
+                logger.info("Processing combined dataset samples...")
+                for category, cat_data in category_data_batches.items():
+                    logger.info(f"Processing category: {category}...")
+                    for sample in tqdm(cat_data, desc=f"Processing {category} samples"):
+                        model(sample.to(model.device))
             except Exception as e:
-                logger.error(f"Error processing category '{category}'")
-                logger.info(
-                    f"Saving partial results for category '{category}' and exiting"
-                )
+                logger.error(f"Error processing combined dataset")
+                logger.info("Saving partial results and exiting")
                 observer.save_state(cat_dir / "partial.pkl")
+                raise e
+            
+            observer.save_state(f_name)
+            observer.close_hooks()
+            
+            logger.info(f"Combined dataset processed and saved to {f_name}")
+            
+            with open(f_name, "rb") as f:
+                observer_data = torch.load(f, weights_only=False)
+            return observer_data
+            
+    else:
+        # Original single dataset logic
+        try:
+            if ds_args.dataset_name == "allenai/c4":
+                file_url = "https://huggingface.co/datasets/allenai/c4/resolve/main/en/c4-train.00000-of-01024.json.gz"
+                c4_single_file_dataset = load_dataset(
+                    "json", data_files={"train": file_url}, split="train", streaming=False
+                )
+                raw_ds = c4_single_file_dataset
+            else:
+                raw_ds = load_dataset(ds_args.dataset_name, split=ds_args.split)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load dataset '{ds_args.dataset_name}': {e}")
+
+        # load dataset processor
+        proc_cls = DATASET_REGISTRY.get(ds_args.dataset_name)
+        if proc_cls is None:
+            raise ValueError(
+                f"No DatasetProcessor registered for '{ds_args.dataset_name}'. "
+                f"Supported: {list(DATASET_REGISTRY.keys())}"
+            )
+
+        # init processor & process dataset
+        processor = proc_cls(
+            dataset=raw_ds,
+            tokenizer=tokenizer,
+            max_input_len=obs_args.model_max_length,
+            split=ds_args.split,
+            split_by_category=obs_args.split_by_category,
+            return_vllm_tokens_prompt=obs_args.return_vllm_tokens_prompt,
+            truncate=obs_args.truncate,
+        )
+        category_data_batches = processor.get_processed_dataset(
+            samples_per_category=obs_args.samples_per_category,
+        )
+        logger.info(
+            "Loaded and processed data for categories: %s",
+            str(list(category_data_batches.keys())),
+        )
+
+        # load observer and hook model
+        try:
+            renormalize_router_weights = getattr(model.config, "norm_topk_prob", False) and obs_args.renormalize_router_weights
+            if renormalize_router_weights:
+                logger.info("Renormalizing topk router weights to sum to 1.")
+            observer_config = OBSERVER_CONFIG_REGISTRY[model.__class__.__name__](
+                # distance_measure=obs_args.distance_measure,
+                distance_measure='cosine',
+                renormalize_router_weights=renormalize_router_weights,
+                record_pruning_metrics_only=obs_args.record_pruning_metrics_only,
+            )
+        except KeyError:
+            raise ValueError(
+                f"No observer configuration registered for model '{model.__class__.__name__}'. "
+                f"Supported: {list(OBSERVER_CONFIG_REGISTRY.keys())}"
+            )
+        observer = MoETransformerObserver(
+            model=model,
+            hook_config=observer_config,
+        )
+
+        if reap_args.profile:
+            # profile at max len
+            with torch.no_grad():
+                try:
+                    model_max_length = obs_args.model_max_length
+                    if model_max_length is None:
+                        model_max_length = tokenizer.model_max_length
+                    logger.info(f"Profiling at model max length: {model_max_length}.")
+                    s = "hello " * model_max_length
+                    tokenized = tokenizer(
+                        [s],
+                        return_tensors="pt",
+                        truncation=True,
+                        max_length=model_max_length,
+                    )
+                    tokenized = {k: v.to(model.device) for k, v in tokenized.items()}
+                    for _ in range(2):
+                        _ = model(**tokenized)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to run model with max input length {model_max_length}: {e}"
+                    )
+            logger.info(
+                f"Model {model_args.model_name} successfully loaded and profiled at max length {model_max_length}."
+            )
+            observer.reset()
+
+        # run samples over model and save observer state
+        with torch.no_grad():
+            for category, cat_data in category_data_batches.items():
+                logger.info(f"Processing category: {category}...")
+                cat_dir = results_dir / str_to_directory_name(category)
+                cat_dir.mkdir(parents=True, exist_ok=True)
+                f_name = cat_dir / obs_args.output_file_name
+                if f_name.exists() and not obs_args.overwrite_observations:
+                    logger.info(
+                        f"Category '{category}' previously processed. Skipping to next category..."
+                    )
+                    continue
+                try:
+                    logger.info("No previous data found @ %s", f_name)
+                    for sample in tqdm(cat_data, desc=f"Processing {category} samples"):
+                        model(sample.to(model.device))
+                except Exception as e:
+                    logger.error(f"Error processing category '{category}'")
+                    logger.info(
+                        f"Saving partial results for category '{category}' and exiting"
+                    )
+                    observer.save_state(cat_dir / "partial.pkl")
+                    logger.info(
+                        f"{category} data processed and saved to "
+                        f"{cat_dir / obs_args.output_file_name}"
+                    )
+                    raise e
+                observer.save_state(cat_dir / obs_args.output_file_name)
+                observer.reset()
                 logger.info(
                     f"{category} data processed and saved to "
                     f"{cat_dir / obs_args.output_file_name}"
                 )
-                raise e
-            observer.save_state(cat_dir / obs_args.output_file_name)
-            observer.reset()
-            logger.info(
-                f"{category} data processed and saved to "
-                f"{cat_dir / obs_args.output_file_name}"
-            )
-    observer.close_hooks()
-    with open(f"{cat_dir / obs_args.output_file_name}", "rb") as f:
-        observer_data = torch.load(f, weights_only=False)
-    return observer_data
+        observer.close_hooks()
+        with open(f"{cat_dir / obs_args.output_file_name}", "rb") as f:
+            observer_data = torch.load(f, weights_only=False)
+        return observer_data
 
 
 def cluster(

@@ -620,7 +620,25 @@ def reload_model_in_full_precision(
     except Exception as config_error:
         logger.warning(f"Could not check for pre-quantization: {config_error}")
     
-    # Remove quantization config to load in full precision
+    # Determine the correct quantization config to use
+    final_quant_config = None
+    if is_pre_quantized:
+        logger.info("Model is pre-quantized, using original quantization config for reload")
+        final_quant_config = pre_quant_config
+        # Convert dict to proper class if needed
+        if isinstance(final_quant_config, dict):
+            try:
+                from transformers import CompressedTensorsConfig
+                if 'format' in final_quant_config and final_quant_config['format'] == 'pack-quantized':
+                    final_quant_config = CompressedTensorsConfig.from_dict(final_quant_config)
+            except ImportError:
+                logger.warning("CompressedTensorsConfig not available, using original config dict")
+            except Exception:
+                logger.warning("Could not convert quantization config to CompressedTensorsConfig, using original")
+    else:
+        # No additional quantization needed if not pre-quantized
+        final_quant_config = None
+    
     # For pre-quantized models, we still load without additional quantization
     try:
         model = AutoModelForCausalLM.from_pretrained(
@@ -629,7 +647,7 @@ def reload_model_in_full_precision(
             dtype=torch.bfloat16,  # Force bfloat16
             trust_remote_code=True,
             local_files_only=local_only,
-            quantization_config=None,  # No quantization
+            quantization_config=final_quant_config,  # Use the correct config
         )
     except OSError as model_load_error:
         # Handle config detection issues
@@ -659,7 +677,7 @@ def reload_model_in_full_precision(
                 dtype=torch.bfloat16,
                 trust_remote_code=True,
                 local_files_only=local_only,
-                quantization_config=None,
+                quantization_config=final_quant_config,  # Use the correct config
             )
         else:
             raise
@@ -726,16 +744,12 @@ def main():
             # Special handling for BitConfig (MiniMax-M2.1-PRISM)
             if config.__class__.__name__ == "BitConfig":
                 logger.info("BitConfig detected - using generic tokenizer fallback")
-                # Use generic tokenizer class that works with BitConfig
-                from transformers import PreTrainedTokenizerFast
-                # Load tokenizer files directly
-                tokenizer = PreTrainedTokenizerFast.from_pretrained(
+                # Try loading with slow tokenizer only (not fast)
+                from transformers import AutoTokenizer
+                tokenizer = AutoTokenizer.from_pretrained(
                     model_name, 
                     trust_remote_code=True,
                     use_fast=False,
-                    # Explicitly set tokenizer files
-                    tokenizer_file=None,
-                    vocab_file=None,
                 )
             else:
                 # Try loading tokenizer with explicit trust_remote_code
@@ -747,18 +761,50 @@ def main():
                 )
         except Exception as tokenizer_error:
             logger.error(f"Fallback tokenizer loading also failed: {tokenizer_error}")
-            # Final fallback: create a basic tokenizer with config
-            logger.info("Attempting final tokenizer fallback with basic configuration")
-            from transformers import PreTrainedTokenizerFast
-            tokenizer = PreTrainedTokenizerFast(
-                bos_token="<s>",
-                eos_token="</s>",
-                pad_token="<pad>",
-                unk_token="<unk>",
-                mask_token="<mask>",
-                trust_remote_code=True,
-            )
-            logger.warning("Created basic fallback tokenizer - may not be fully compatible")
+            # Final fallback: try to load with just the path
+            try:
+                logger.info("Attempting final fallback with direct file loading")
+                from transformers import AutoTokenizer
+                tokenizer = AutoTokenizer.from_pretrained(
+                    model_name,
+                    trust_remote_code=True,
+                    use_fast=False,
+                    # Skip slow-fast tokenizer conflicts by forcing slow tokenizer
+                )
+            except Exception:
+                # Last resort: Create a basic tokenizer 
+                logger.info("Creating basic fallback tokenizer")
+                # Use a basic fast tokenizer with simple parameters
+                from transformers import PreTrainedTokenizerBase
+                # Dynamically create a tokenizer by loading files manually
+                import os
+                import json
+                try:
+                    # Try to load tokenization files manually
+                    from transformers import AddedToken
+                    from tokenizers import Tokenizer, models, pre_tokenizers, decoders, processors, trainers
+                    from tokenizers.implementations import BaseTokenizer
+                    
+                    # Use the slow tokenizer instead of trying to build a fast one
+                    from transformers import AutoTokenizer
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        model_name,
+                        trust_remote_code=True,
+                        use_fast=False
+                    )
+                except Exception:
+                    logger.warning("Creating basic fallback tokenizer with standard parameters")
+                    from transformers import GPT2TokenizerFast  # Using GPT2 as a generic fallback
+                    tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+                    # Update special tokens if possible
+                    if hasattr(tokenizer, 'add_special_tokens'):
+                        tokenizer.add_special_tokens({
+                            'pad_token': '<pad>',
+                            'unk_token': '<unk>',
+                            'bos_token': '<s>',
+                            'eos_token': '</s>',
+                        })
+                    logger.warning("Using generic GPT2 tokenizer as final fallback - may not be fully compatible")
     
     # load model
     local_only = _env_flag("REAP_LOCAL_FILES_ONLY", True)
@@ -803,9 +849,21 @@ def main():
             )
             quantization_config = None
     elif is_pre_quantized:
-        logger.info("Model is pre-quantized, skipping 4-bit quantization config")
-        # Preserve pre-quantization config to avoid NoneType errors
+        logger.info("Model is pre-quantized, using original quantization config")
+        # Use the original quantization config directly to avoid class mismatch issues
         quantization_config = pre_quant_config
+        # But we need to ensure we pass the correct class type
+        # If quantization_config is a dict (like in Kimi-K2), try to convert it
+        if isinstance(quantization_config, dict):
+            try:
+                # Try to import CompressedTensorsConfig if available
+                from transformers import CompressedTensorsConfig
+                if 'format' in quantization_config and quantization_config['format'] == 'pack-quantized':
+                    quantization_config = CompressedTensorsConfig.from_dict(quantization_config)
+            except ImportError:
+                logger.warning("CompressedTensorsConfig not available, using original config dict")
+            except Exception:
+                logger.warning("Could not convert quantization config to CompressedTensorsConfig, using original")
     
     # --- FIX 3: Handle model loading with fallback for config detection issues ---
     try:

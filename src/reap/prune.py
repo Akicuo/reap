@@ -395,7 +395,6 @@ def main():
             if config.__class__.__name__ == "BitConfig":
                 logger.info("BitConfig detected - using generic tokenizer fallback")
                 # Try loading with slow tokenizer only (not fast)
-                from transformers import AutoTokenizer
                 tokenizer = AutoTokenizer.from_pretrained(
                     model_name, 
                     trust_remote_code=True,
@@ -414,7 +413,6 @@ def main():
             # Final fallback: try to load with just the path
             try:
                 logger.info("Attempting final fallback with direct file loading")
-                from transformers import AutoTokenizer
                 tokenizer = AutoTokenizer.from_pretrained(
                     model_name,
                     trust_remote_code=True,
@@ -424,19 +422,8 @@ def main():
             except Exception:
                 # Last resort: Create a basic tokenizer 
                 logger.info("Creating basic fallback tokenizer")
-                # Use a basic fast tokenizer with simple parameters
-                from transformers import PreTrainedTokenizerBase
-                # Dynamically create a tokenizer by loading files manually
-                import os
-                import json
                 try:
-                    # Try to load tokenization files manually
-                    from transformers import AddedToken
-                    from tokenizers import Tokenizer, models, pre_tokenizers, decoders, processors, trainers
-                    from tokenizers.implementations import BaseTokenizer
-                    
                     # Use the slow tokenizer instead of trying to build a fast one
-                    from transformers import AutoTokenizer
                     tokenizer = AutoTokenizer.from_pretrained(
                         model_name,
                         trust_remote_code=True,

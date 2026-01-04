@@ -827,7 +827,13 @@ OBSERVER_CONFIG_REGISTRY = {
     "DeepseekV2ForCausalLM": DeepSeekMoEObserverHookConfig,
     "Ernie4_5_MoEForCausalLM": Ernie4_5MoEObserverHookConfig,
     "Ernie4_5_MoeForCausalLM": Ernie4_5MoEObserverHookConfig,
-    "Glm4MoeForCausalLM": Glm44MoEObserverHookConfig,    "SolarOpenForCausalLM": SolarOpenForCausalLMObserverHookConfig,
+    "Glm4MoeForCausalLM": Glm44MoEObserverHookConfig,
+    "SolarOpenForCausalLM": SolarOpenForCausalLMObserverHookConfig,
     "VaetkiForCausalLM": VaetkiForCausalLMObserverHookConfig,
-
+    # PrimeIntellect/INTELLECT-3 - DeepSeek V3 based
+    "DeepseekV3ForCausalLM": DeepSeekMoEObserverHookConfig,
+    # MiniMax-M2.1-PRISM - similar to DeepSeek
+    "MiniMaxForCausalLM": DeepSeekMoEObserverHookConfig,
+    # Kimi-K2-Thinking - DeepSeek V3 based
+    "KimiK2ForCausalLM": DeepSeekMoEObserverHookConfig,
 }

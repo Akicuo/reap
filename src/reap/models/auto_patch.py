@@ -220,6 +220,18 @@ def patch_specific_model(model: nn.Module, model_class_name: str) -> int:
     if model_class_name in specific_patchers:
         return specific_patchers[model_class_name](model)
     
+    # For new model types that should work with generic patching
+    # These are DeepSeek-like architectures
+    new_supported_models = [
+        "DeepseekV3ForCausalLM",
+        "MiniMaxForCausalLM", 
+        "KimiK2ForCausalLM",
+    ]
+    
+    if model_class_name in new_supported_models:
+        logger.info(f"Model {model_class_name} is a supported DeepSeek-like architecture, using generic patcher")
+        return auto_patch_moe(model)
+    
     # Fall back to generic patcher
     return auto_patch_moe(model)
 
@@ -278,6 +290,25 @@ def needs_patching(model: nn.Module) -> bool:
     Returns True if the model has MoE blocks that don't appear to
     return router_logits in their forward output.
     """
+    model_class_name = model.__class__.__name__
+    
+    # These model types are known to work without patching
+    # (they return router_logits properly)
+    no_patch_needed = [
+        "Qwen3MoeForCausalLM",
+        "Llama4ForCausalLM",
+        "MixtralForCausalLM",
+        "DeepseekV2ForCausalLM",
+        "DeepseekV3ForCausalLM",  # V3 typically returns router_logits
+        "Ernie4_5_MoEForCausalLM",
+        "Glm4MoeForCausalLM",
+        "SolarOpenForCausalLM",
+    ]
+    
+    if model_class_name in no_patch_needed:
+        logger.debug(f"Model {model_class_name} is known to not need patching")
+        return False
+    
     for name, module in model.named_modules():
         if _is_moe_block(module):
             # If already patched, no need

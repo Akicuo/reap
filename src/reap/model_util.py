@@ -138,6 +138,42 @@ MODEL_ATTRS = {
         "num_experts": "n_routed_experts",
         "num_experts_per_tok": "num_experts_per_tok",
     },
+    # PrimeIntellect/INTELLECT-3 - DeepSeek V3 based architecture
+    "DeepseekV3ForCausalLM": {
+        "moe_block": "mlp",
+        "gate_proj": "gate_proj",
+        "up_proj": "up_proj",
+        "down_proj": "down_proj",
+        "experts": "experts",
+        "fused": False,
+        "router": "gate",
+        "num_experts": "n_routed_experts",
+        "num_experts_per_tok": "num_experts_per_tok",
+    },
+    # MiniMax-M2.1-PRISM - likely similar to DeepSeek architecture
+    "MiniMaxForCausalLM": {
+        "moe_block": "mlp",
+        "gate_proj": "gate_proj",
+        "up_proj": "up_proj",
+        "down_proj": "down_proj",
+        "experts": "experts",
+        "fused": False,
+        "router": "gate",
+        "num_experts": "n_routed_experts",
+        "num_experts_per_tok": "num_experts_per_tok",
+    },
+    # Kimi-K2-Thinking - DeepSeek V3 based architecture
+    "KimiK2ForCausalLM": {
+        "moe_block": "mlp",
+        "gate_proj": "gate_proj",
+        "up_proj": "up_proj",
+        "down_proj": "down_proj",
+        "experts": "experts",
+        "fused": False,
+        "router": "gate",
+        "num_experts": "n_routed_experts",
+        "num_experts_per_tok": "num_experts_per_tok",
+    },
 
 }
 
@@ -339,6 +375,24 @@ def patched_model_map(model: str):
     if model == "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8":
         patched = True
         model_name = "artifacts/models/Qwen3-Coder-480B-A35B-Instruct-FP8"
+
+    # --- Model-specific patches for problematic models ---
+    
+    # PrimeIntellect/INTELLECT-3 - uses DeepSeek V3 architecture
+    # The model may have config detection issues, handled in main loading logic
+    if model == "PrimeIntellect/INTELLECT-3":
+        patched = False  # No local patch needed, handled by config detection fix
+        logger.info(f"PrimeIntellect/INTELLECT-3 detected - will use auto-detection and config handling")
+
+    # Ex0bit/MiniMax-M2.1-PRISM - custom BitConfig tokenizer issues
+    if model == "Ex0bit/MiniMax-M2.1-PRISM":
+        patched = False  # No local patch needed, handled by tokenizer fallback
+        logger.info(f"Ex0bit/MiniMax-M2.1-PRISM detected - will use tokenizer fallback handling")
+
+    # moonshotai/Kimi-K2-Thinking - pre-quantized with CompressedTensorsConfig
+    if model == "moonshotai/Kimi-K2-Thinking":
+        patched = False  # No local patch needed, handled by pre-quantization detection
+        logger.info(f"moonshotai/Kimi-K2-Thinking detected - will skip 4-bit quantization to avoid conflicts")
 
     if patched:
         logger.info(f"Using patched model for {model} from: {model_name}")

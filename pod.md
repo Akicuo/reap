@@ -123,12 +123,12 @@ cd /opt/reap
 source .venv/bin/activate
 
 python -u -m reap.prune \
-  --model_name upstage/Solar-Open-100B \
+  --model_name moonshotai/Kimi-K2-Thinking \
   --dataset_name theblackcat102/evol-codealpaca-v1 \
-  --samples_per_category 16 \
+  --samples_per_category 48 \
   --model_max_length 8 \
   --prune_method reap \
-  --compression_ratio 0.5 \
+  --compression_ratio 0.25 \
   --distance_measure cosine \
   --load_in_4bit true \
   --no_plot_clusters \
@@ -153,17 +153,17 @@ source .venv/bin/activate
 python -u -m reap.prune \
   --model_name upstage/Solar-Open-100B \
   --dataset_name theblackcat102/evol-codealpaca-v1 \
-  --samples_per_category 512 \
-  --model_max_length 64 \
+  --samples_per_category 48 \
+  --model_max_length 8 \
   --prune_method reap \
-  --compression_ratio 0.5 \
+  --compression_ratio 0.35 \
   --distance_measure cosine \
   --load_in_4bit true \
   --no_plot_clusters \
-  --do_eval true \
+  --do_eval false \
   --run_lm_eval false \
   --run_evalplus false \
-  --run_livecodebench true \
+  --run_livecodebench false \
   --run_math false \
   --run_wildbench false
 ```

@@ -255,15 +255,49 @@ def reload_model_in_full_precision(
     """
     logger.info("Reloading model in full precision (bfloat16) for pruning...")
     
+    # Check if model is pre-quantized to avoid conflicts
+    is_pre_quantized = False
+    try:
+        from transformers import AutoConfig
+        config = AutoConfig.from_pretrained(model_name, trust_remote_code=True, local_files_only=local_only)
+        if hasattr(config, 'quantization_config') and config.quantization_config:
+            is_pre_quantized = True
+            logger.info(f"Model appears to be pre-quantized: {config.quantization_config}")
+    except Exception as config_error:
+        logger.warning(f"Could not check for pre-quantization: {config_error}")
+    
     # Remove quantization config to load in full precision
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        device_map="auto",
-        dtype=torch.bfloat16,  # Force bfloat16
-        trust_remote_code=True,
-        local_files_only=local_only,
-        quantization_config=None,  # No quantization
-    )
+    # For pre-quantized models, we still load without additional quantization
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            device_map="auto",
+            dtype=torch.bfloat16,  # Force bfloat16
+            trust_remote_code=True,
+            local_files_only=local_only,
+            quantization_config=None,  # No quantization
+        )
+    except OSError as model_load_error:
+        # Handle config detection issues
+        if "does not appear to have a file named configuration" in str(model_load_error):
+            logger.warning(f"Config detection failed during reload: {model_load_error}")
+            from transformers import AutoConfig
+            config = AutoConfig.from_pretrained(
+                model_name,
+                trust_remote_code=True,
+                local_files_only=local_only,
+            )
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                config=config,
+                device_map="auto",
+                dtype=torch.bfloat16,
+                trust_remote_code=True,
+                local_files_only=local_only,
+                quantization_config=None,
+            )
+        else:
+            raise
     
     # Re-apply patches for the new model instance
     # 1. Ensure model is in MODEL_ATTRS (auto-register if needed)
@@ -311,11 +345,50 @@ def main():
     model_name = patched_model_map(model_args.model_name)
     # Apply compat patches BEFORE importing any trust_remote_code modules
     apply_transformers_compat_patches()
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    
+    # --- FIX 1: Handle tokenizer loading for models with custom configs ---
+    # Some models (like MiniMax-M2.1-PRISM) use custom config classes that aren't in tokenizer mapping
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    except KeyError as e:
+        logger.warning(f"Standard tokenizer loading failed: {e}")
+        logger.info("Attempting fallback tokenizer loading with trust_remote_code and custom handling...")
+        # Try with additional trust_remote_code and fallback options
+        try:
+            from transformers import AutoConfig
+            # Get config to understand the model type
+            config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+            logger.info(f"Model config type: {config.__class__.__name__}")
+            
+            # Try loading tokenizer with explicit trust_remote_code
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name, 
+                trust_remote_code=True,
+                # Add fallback for models with custom tokenizers
+                use_fast=False,
+            )
+        except Exception as tokenizer_error:
+            logger.error(f"Fallback tokenizer loading also failed: {tokenizer_error}")
+            raise
+    
     # load model
     local_only = _env_flag("REAP_LOCAL_FILES_ONLY", True)
     quantization_config = None
-    if obs_args.load_in_4bit:
+    
+    # --- FIX 2: Detect pre-quantized models and skip BitsAndBytesConfig ---
+    # Check if model is already quantized (e.g., Kimi-K2-Thinking with CompressedTensorsConfig)
+    is_pre_quantized = False
+    try:
+        from transformers import AutoConfig
+        config = AutoConfig.from_pretrained(model_name, trust_remote_code=True, local_files_only=local_only)
+        if hasattr(config, 'quantization_config') and config.quantization_config:
+            is_pre_quantized = True
+            logger.info(f"Model appears to be pre-quantized: {config.quantization_config}")
+            logger.info("Will skip BitsAndBytesConfig to avoid conflicts")
+    except Exception as config_error:
+        logger.warning(f"Could not check for pre-quantization: {config_error}")
+    
+    if obs_args.load_in_4bit and not is_pre_quantized:
         logger.info("Loading model in 4-bit quantization to reduce VRAM during expert analysis.")
         try:
             quantization_config = BitsAndBytesConfig(
@@ -331,14 +404,50 @@ def main():
                 e,
             )
             quantization_config = None
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        device_map="auto",
-        dtype="auto",
-        trust_remote_code=True,
-        local_files_only=local_only,
-        quantization_config=quantization_config,
-    )
+    elif is_pre_quantized:
+        logger.info("Model is pre-quantized, skipping 4-bit quantization config")
+    
+    # --- FIX 3: Handle model loading with fallback for config detection issues ---
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            device_map="auto",
+            dtype="auto",
+            trust_remote_code=True,
+            local_files_only=local_only,
+            quantization_config=quantization_config,
+        )
+    except OSError as model_load_error:
+        # Handle cases like PrimeIntellect/INTELLECT-3 where config detection fails
+        if "does not appear to have a file named configuration" in str(model_load_error):
+            logger.warning(f"Config detection failed: {model_load_error}")
+            logger.info("Attempting to load with explicit config class handling...")
+            
+            # Try loading with explicit config class from transformers
+            from transformers import AutoConfig
+            try:
+                # Force load config first
+                config = AutoConfig.from_pretrained(
+                    model_name,
+                    trust_remote_code=True,
+                    local_files_only=local_only,
+                )
+                logger.info(f"Loaded config: {config.__class__.__name__}")
+                
+                # Now try loading model with the config
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    config=config,
+                    device_map="auto",
+                    trust_remote_code=True,
+                    local_files_only=local_only,
+                    quantization_config=quantization_config,
+                )
+            except Exception as fallback_error:
+                logger.error(f"Fallback loading also failed: {fallback_error}")
+                raise
+        else:
+            raise
     
     # --- AUTO-DETECTION AND PATCHING FOR UNSUPPORTED MODELS ---
     model_class_name = model.__class__.__name__

@@ -305,11 +305,64 @@ def reload_model_in_full_precision(
             # Special handling for PrimeIntellect/INTELLECT-3 (GLM4 misdetection fix)
             if model_name == "PrimeIntellect/INTELLECT-3":
                 logger.info("PrimeIntellect/INTELLECT-3 detected - overriding GLM4 config misdetection during reload")
-                from transformers import PretrainedConfig
-                config = PretrainedConfig(
-                    model_type="deepseek_v3",
-                    trust_remote_code=True,
-                )
+                # Use the same complex config handling as in main loading
+                from transformers import AutoConfig
+                try:
+                    # First, check if any config files exist in the model repo manually
+                    import os
+                    from huggingface_hub import snapshot_download
+                    # Download config.json only temporarily to inspect it
+                    temp_dir = snapshot_download(model_name, allow_patterns=["config.json"], local_files_only=local_only)
+                    
+                    # Try to read the config.json directly to get the model type
+                    config_path = os.path.join(temp_dir, "config.json")
+                    if os.path.exists(config_path):
+                        import json
+                        with open(config_path, 'r') as f:
+                            config_dict = json.load(f)
+                        # Get the model type from the config
+                        model_type = config_dict.get("model_type", "deepseek_v3")  # Default to deepseek_v3
+                        logger.info(f"Detected model type from config.json: {model_type}")
+                        
+                        # Try to load config with the actual model type
+                        config = AutoConfig.from_pretrained(
+                            model_name,
+                            trust_remote_code=True,
+                            local_files_only=local_only,
+                        )
+                    else:
+                        # If config.json doesn't exist, try to create config based on known architecture
+                        logger.info("Config.json not found, assuming DeepSeekV3-like architecture")
+                        from transformers import PretrainedConfig
+                        config = PretrainedConfig(
+                            model_type="deepseek",
+                            architectures=["AutoModelForCausalLM"],
+                            vocab_size=102400,
+                            hidden_size=4096,
+                            num_hidden_layers=28,
+                            num_attention_heads=32,
+                            intermediate_size=11008,
+                            max_position_embeddings=32768,
+                            rms_norm_eps=1e-06,
+                            rope_theta=10000.0,
+                            trust_remote_code=True,
+                        )
+                except Exception:
+                    # Final fallback
+                    from transformers import PretrainedConfig
+                    config = PretrainedConfig(
+                        model_type="deepseek",
+                        architectures=["AutoModelForCausalLM"],
+                        vocab_size=102400,
+                        hidden_size=4096,
+                        num_hidden_layers=28,
+                        num_attention_heads=32,
+                        intermediate_size=11008,
+                        max_position_embeddings=32768,
+                        rms_norm_eps=1e-06,
+                        rope_theta=10000.0,
+                        trust_remote_code=True,
+                    )
             else:
                 from transformers import AutoConfig
                 config = AutoConfig.from_pretrained(
@@ -514,24 +567,75 @@ def main():
             # Special handling for PrimeIntellect/INTELLECT-3 (GLM4 misdetection fix)
             if model_name == "PrimeIntellect/INTELLECT-3":
                 logger.info("PrimeIntellect/INTELLECT-3 detected - overriding GLM4 config misdetection")
-                # Explicitly use DeepseekV3 config class instead of GLM4
+                # Try to get the actual model config type
                 from transformers import AutoConfig
                 try:
-                    # Force load config with trust_remote_code to get correct config
-                    config = AutoConfig.from_pretrained(
-                        model_name,
-                        trust_remote_code=True,
-                        local_files_only=local_only,
-                        # Override config class detection
-                        _from_auto=True,
-                    )
-                    logger.info(f"Loaded correct config: {config.__class__.__name__}")
-                except Exception:
-                    logger.info("Falling back to generic config for PrimeIntellect/INTELLECT-3")
-                    # Create basic config if auto config fails
+                    # First, check if any config files exist in the model repo manually
+                    import os
+                    from huggingface_hub import snapshot_download
+                    # Download config.json only temporarily to inspect it
+                    temp_dir = snapshot_download(model_name, allow_patterns=["config.json"], local_files_only=local_only)
+                    
+                    # Try to read the config.json directly to get the model type
+                    config_path = os.path.join(temp_dir, "config.json")
+                    if os.path.exists(config_path):
+                        import json
+                        with open(config_path, 'r') as f:
+                            config_dict = json.load(f)
+                        # Get the model type from the config
+                        model_type = config_dict.get("model_type", "deepseek_v3")  # Default to deepseek_v3
+                        logger.info(f"Detected model type from config.json: {model_type}")
+                        
+                        # Try to load config with the actual model type
+                        # First try loading with trust_remote_code to get the real config class
+                        config = AutoConfig.from_pretrained(
+                            model_name,
+                            trust_remote_code=True,
+                            local_files_only=local_only,
+                        )
+                    else:
+                        # If config.json doesn't exist, try to create config based on known architecture
+                        logger.info("Config.json not found, assuming DeepSeekV3-like architecture")
+                        from transformers import PretrainedConfig
+                        
+                        # Define a minimal DeepSeekV3-like config
+                        config_attrs = {
+                            "model_type": "deepseek_v3",
+                            "architectures": ["DeepseekV3ForCausalLM"],
+                            "vocab_size": 102400,  # Common for DeepSeek models
+                            "hidden_size": 4096,  # Default, will be overridden if config loads
+                            "num_hidden_layers": 28,
+                            "num_attention_heads": 32,
+                            "num_key_value_heads": 32,
+                            "intermediate_size": 11008,
+                            "max_position_embeddings": 32768,
+                            "rms_norm_eps": 1e-06,
+                            "rope_theta": 10000.0,
+                            "attn_implementation": "flash_attention_2",
+                            "trust_remote_code": True,
+                        }
+                        from transformers import DeepseekV2Config  # Use similar base config
+                        try:
+                            config = DeepseekV2Config(**config_attrs)
+                        except:
+                            # If DeepseekV2Config doesn't exist, use generic config
+                            config = PretrainedConfig(**config_attrs)
+                except Exception as deep_error:
+                    logger.warning(f"Deep approach failed: {deep_error}")
+                    logger.info("Using minimal fallback config for PrimeIntellect/INTELLECT-3")
+                    # Create a basic config that's compatible with AutoModelForCausalLM
                     from transformers import PretrainedConfig
                     config = PretrainedConfig(
-                        model_type="deepseek_v3",
+                        model_type="deepseek",  # Use a known model type
+                        architectures=["AutoModelForCausalLM"],  # Specify that it's a CausalLM
+                        vocab_size=102400,
+                        hidden_size=4096,
+                        num_hidden_layers=28,
+                        num_attention_heads=32,
+                        intermediate_size=11008,
+                        max_position_embeddings=32768,
+                        rms_norm_eps=1e-06,
+                        rope_theta=10000.0,
                         trust_remote_code=True,
                     )
             else:

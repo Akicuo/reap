@@ -321,15 +321,30 @@ def reload_model_in_full_precision(
                         with open(config_path, 'r') as f:
                             config_dict = json.load(f)
                         # Get the model type from the config
-                        model_type = config_dict.get("model_type", "deepseek_v3")  # Default to deepseek_v3
+                        model_type = config_dict.get("model_type", "deepseek_v3")
                         logger.info(f"Detected model type from config.json: {model_type}")
                         
-                        # Try to load config with the actual model type
-                        config = AutoConfig.from_pretrained(
-                            model_name,
-                            trust_remote_code=True,
-                            local_files_only=local_only,
-                        )
+                        if model_type == "glm4_moe":
+                            # Use transformers built-in Glm4MoeConfig if available
+                            try:
+                                from transformers import Glm4MoeConfig
+                                logger.info("Using built-in Glm4MoeConfig")
+                                config = Glm4MoeConfig.from_pretrained(model_name, trust_remote_code=True)
+                            except ImportError:
+                                logger.warning("Glm4MoeConfig not found in transformers, trying fallback")
+                                # Fallback to generic config but with correct model_type
+                                from transformers import PretrainedConfig
+                                config = PretrainedConfig(
+                                    model_type="glm4_moe",
+                                    trust_remote_code=True
+                                )
+                        else:
+                            # Try to load config with the actual model type
+                            config = AutoConfig.from_pretrained(
+                                model_name,
+                                trust_remote_code=True,
+                                local_files_only=local_only,
+                            )
                     else:
                         # If config.json doesn't exist, try to create config based on known architecture
                         logger.info("Config.json not found, assuming DeepSeekV3-like architecture")
@@ -349,20 +364,19 @@ def reload_model_in_full_precision(
                         )
                 except Exception:
                     # Final fallback
-                    from transformers import PretrainedConfig
-                    config = PretrainedConfig(
-                        model_type="deepseek",
-                        architectures=["AutoModelForCausalLM"],
-                        vocab_size=102400,
-                        hidden_size=4096,
-                        num_hidden_layers=28,
-                        num_attention_heads=32,
-                        intermediate_size=11008,
-                        max_position_embeddings=32768,
-                        rms_norm_eps=1e-06,
-                        rope_theta=10000.0,
-                        trust_remote_code=True,
-                    )
+                    try:
+                        from transformers import Glm4MoeConfig
+                        config = Glm4MoeConfig(vocab_size=151552, hidden_size=4096, num_layers=40)
+                    except:
+                        from transformers import PretrainedConfig
+                        config = PretrainedConfig(
+                            model_type="glm4_moe",
+                            architectures=["Glm4MoeForCausalLM"],
+                            vocab_size=151552,
+                            hidden_size=4096,
+                            num_hidden_layers=40,
+                            trust_remote_code=True,
+                        )
             else:
                 from transformers import AutoConfig
                 config = AutoConfig.from_pretrained(
@@ -583,16 +597,31 @@ def main():
                         with open(config_path, 'r') as f:
                             config_dict = json.load(f)
                         # Get the model type from the config
-                        model_type = config_dict.get("model_type", "deepseek_v3")  # Default to deepseek_v3
+                        model_type = config_dict.get("model_type", "deepseek_v3")
                         logger.info(f"Detected model type from config.json: {model_type}")
                         
-                        # Try to load config with the actual model type
-                        # First try loading with trust_remote_code to get the real config class
-                        config = AutoConfig.from_pretrained(
-                            model_name,
-                            trust_remote_code=True,
-                            local_files_only=local_only,
-                        )
+                        if model_type == "glm4_moe":
+                            # Use transformers built-in Glm4MoeConfig if available
+                            try:
+                                from transformers import Glm4MoeConfig
+                                logger.info("Using built-in Glm4MoeConfig")
+                                config = Glm4MoeConfig.from_pretrained(model_name, trust_remote_code=True)
+                            except ImportError:
+                                logger.warning("Glm4MoeConfig not found in transformers, trying fallback")
+                                # Fallback to generic config but with correct model_type
+                                from transformers import PretrainedConfig
+                                config = PretrainedConfig(
+                                    model_type="glm4_moe",
+                                    trust_remote_code=True
+                                )
+                        else:
+                            # Try to load config with the actual model type
+                            # First try loading with trust_remote_code to get the real config class
+                            config = AutoConfig.from_pretrained(
+                                model_name,
+                                trust_remote_code=True,
+                                local_files_only=local_only,
+                            )
                     else:
                         # If config.json doesn't exist, try to create config based on known architecture
                         logger.info("Config.json not found, assuming DeepSeekV3-like architecture")
@@ -624,20 +653,19 @@ def main():
                     logger.warning(f"Deep approach failed: {deep_error}")
                     logger.info("Using minimal fallback config for PrimeIntellect/INTELLECT-3")
                     # Create a basic config that's compatible with AutoModelForCausalLM
-                    from transformers import PretrainedConfig
-                    config = PretrainedConfig(
-                        model_type="deepseek",  # Use a known model type
-                        architectures=["AutoModelForCausalLM"],  # Specify that it's a CausalLM
-                        vocab_size=102400,
-                        hidden_size=4096,
-                        num_hidden_layers=28,
-                        num_attention_heads=32,
-                        intermediate_size=11008,
-                        max_position_embeddings=32768,
-                        rms_norm_eps=1e-06,
-                        rope_theta=10000.0,
-                        trust_remote_code=True,
-                    )
+                    try:
+                        from transformers import Glm4MoeConfig
+                        config = Glm4MoeConfig(vocab_size=151552, hidden_size=4096, num_layers=40)
+                    except:
+                        from transformers import PretrainedConfig
+                        config = PretrainedConfig(
+                            model_type="glm4_moe",  # Use the detected type
+                            architectures=["Glm4MoeForCausalLM"],  
+                            vocab_size=151552,
+                            hidden_size=4096,
+                            num_hidden_layers=40,
+                            trust_remote_code=True,
+                        )
             else:
                 # Try loading with explicit config class from transformers
                 from transformers import AutoConfig

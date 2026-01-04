@@ -609,12 +609,14 @@ def reload_model_in_full_precision(
     
     # Check if model is pre-quantized to avoid conflicts
     is_pre_quantized = False
+    pre_quant_config = None
     try:
         from transformers import AutoConfig
         config = AutoConfig.from_pretrained(model_name, trust_remote_code=True, local_files_only=local_only)
         if hasattr(config, 'quantization_config') and config.quantization_config:
             is_pre_quantized = True
-            logger.info(f"Model appears to be pre-quantized: {config.quantization_config}")
+            pre_quant_config = config.quantization_config
+            logger.info(f"Model appears to be pre-quantized: {pre_quant_config}")
     except Exception as config_error:
         logger.warning(f"Could not check for pre-quantization: {config_error}")
     
@@ -633,12 +635,23 @@ def reload_model_in_full_precision(
         # Handle config detection issues
         if "does not appear to have a file named configuration" in str(model_load_error):
             logger.warning(f"Config detection failed during reload: {model_load_error}")
-            from transformers import AutoConfig
-            config = AutoConfig.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                local_files_only=local_only,
-            )
+            
+            # Special handling for PrimeIntellect/INTELLECT-3 (GLM4 misdetection fix)
+            if model_name == "PrimeIntellect/INTELLECT-3":
+                logger.info("PrimeIntellect/INTELLECT-3 detected - overriding GLM4 config misdetection during reload")
+                from transformers import PretrainedConfig
+                config = PretrainedConfig(
+                    model_type="deepseek_v3",
+                    trust_remote_code=True,
+                )
+            else:
+                from transformers import AutoConfig
+                config = AutoConfig.from_pretrained(
+                    model_name,
+                    trust_remote_code=True,
+                    local_files_only=local_only,
+                )
+            
             model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 config=config,
@@ -710,16 +723,42 @@ def main():
             config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
             logger.info(f"Model config type: {config.__class__.__name__}")
             
-            # Try loading tokenizer with explicit trust_remote_code
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_name, 
-                trust_remote_code=True,
-                # Add fallback for models with custom tokenizers
-                use_fast=False,
-            )
+            # Special handling for BitConfig (MiniMax-M2.1-PRISM)
+            if config.__class__.__name__ == "BitConfig":
+                logger.info("BitConfig detected - using generic tokenizer fallback")
+                # Use generic tokenizer class that works with BitConfig
+                from transformers import PreTrainedTokenizerFast
+                # Load tokenizer files directly
+                tokenizer = PreTrainedTokenizerFast.from_pretrained(
+                    model_name, 
+                    trust_remote_code=True,
+                    use_fast=False,
+                    # Explicitly set tokenizer files
+                    tokenizer_file=None,
+                    vocab_file=None,
+                )
+            else:
+                # Try loading tokenizer with explicit trust_remote_code
+                tokenizer = AutoTokenizer.from_pretrained(
+                    model_name, 
+                    trust_remote_code=True,
+                    # Add fallback for models with custom tokenizers
+                    use_fast=False,
+                )
         except Exception as tokenizer_error:
             logger.error(f"Fallback tokenizer loading also failed: {tokenizer_error}")
-            raise
+            # Final fallback: create a basic tokenizer with config
+            logger.info("Attempting final tokenizer fallback with basic configuration")
+            from transformers import PreTrainedTokenizerFast
+            tokenizer = PreTrainedTokenizerFast(
+                bos_token="<s>",
+                eos_token="</s>",
+                pad_token="<pad>",
+                unk_token="<unk>",
+                mask_token="<mask>",
+                trust_remote_code=True,
+            )
+            logger.warning("Created basic fallback tokenizer - may not be fully compatible")
     
     # load model
     local_only = _env_flag("REAP_LOCAL_FILES_ONLY", True)
@@ -734,12 +773,14 @@ def main():
     # --- FIX 2: Detect pre-quantized models and skip BitsAndBytesConfig ---
     # Check if model is already quantized (e.g., Kimi-K2-Thinking with CompressedTensorsConfig)
     is_pre_quantized = False
+    pre_quant_config = None
     try:
         from transformers import AutoConfig
         config = AutoConfig.from_pretrained(model_name, trust_remote_code=True, local_files_only=local_only)
         if hasattr(config, 'quantization_config') and config.quantization_config:
             is_pre_quantized = True
-            logger.info(f"Model appears to be pre-quantized: {config.quantization_config}")
+            pre_quant_config = config.quantization_config
+            logger.info(f"Model appears to be pre-quantized: {pre_quant_config}")
             logger.info("Will skip BitsAndBytesConfig to avoid conflicts")
     except Exception as config_error:
         logger.warning(f"Could not check for pre-quantization: {config_error}")
@@ -763,6 +804,8 @@ def main():
             quantization_config = None
     elif is_pre_quantized:
         logger.info("Model is pre-quantized, skipping 4-bit quantization config")
+        # Preserve pre-quantization config to avoid NoneType errors
+        quantization_config = pre_quant_config
     
     # --- FIX 3: Handle model loading with fallback for config detection issues ---
     try:
@@ -780,29 +823,57 @@ def main():
             logger.warning(f"Config detection failed: {model_load_error}")
             logger.info("Attempting to load with explicit config class handling...")
             
-            # Try loading with explicit config class from transformers
-            from transformers import AutoConfig
-            try:
-                # Force load config first
-                config = AutoConfig.from_pretrained(
-                    model_name,
-                    trust_remote_code=True,
-                    local_files_only=local_only,
-                )
-                logger.info(f"Loaded config: {config.__class__.__name__}")
-                
-                # Now try loading model with the config
-                model = AutoModelForCausalLM.from_pretrained(
-                    model_name,
-                    config=config,
-                    device_map="auto",
-                    trust_remote_code=True,
-                    local_files_only=local_only,
-                    quantization_config=quantization_config,
-                )
-            except Exception as fallback_error:
-                logger.error(f"Fallback loading also failed: {fallback_error}")
-                raise
+            # Special handling for PrimeIntellect/INTELLECT-3 (GLM4 misdetection fix)
+            if model_name == "PrimeIntellect/INTELLECT-3":
+                logger.info("PrimeIntellect/INTELLECT-3 detected - overriding GLM4 config misdetection")
+                # Explicitly use DeepseekV3 config class instead of GLM4
+                from transformers import AutoConfig
+                try:
+                    # Force load config with trust_remote_code to get correct config
+                    config = AutoConfig.from_pretrained(
+                        model_name,
+                        trust_remote_code=True,
+                        local_files_only=local_only,
+                        # Override config class detection
+                        _from_auto=True,
+                    )
+                    logger.info(f"Loaded correct config: {config.__class__.__name__}")
+                except Exception:
+                    logger.info("Falling back to generic config for PrimeIntellect/INTELLECT-3")
+                    # Create basic config if auto config fails
+                    from transformers import PretrainedConfig
+                    config = PretrainedConfig(
+                        model_type="deepseek_v3",
+                        trust_remote_code=True,
+                    )
+            else:
+                # Try loading with explicit config class from transformers
+                from transformers import AutoConfig
+                try:
+                    # Force load config first
+                    config = AutoConfig.from_pretrained(
+                        model_name,
+                        trust_remote_code=True,
+                        local_files_only=local_only,
+                    )
+                    logger.info(f"Loaded config: {config.__class__.__name__}")
+                except Exception as config_error:
+                    logger.warning(f"Could not load config normally: {config_error}")
+                    logger.info("Using generic config fallback")
+                    from transformers import PretrainedConfig
+                    config = PretrainedConfig(
+                        trust_remote_code=True,
+                    )
+            
+            # Now try loading model with the config
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                config=config,
+                device_map="auto",
+                trust_remote_code=True,
+                local_files_only=local_only,
+                quantization_config=quantization_config,
+            )
         else:
             raise
     

@@ -606,8 +606,22 @@ def main():
                                 from transformers import Glm4MoeConfig
                                 logger.info("Using built-in Glm4MoeConfig")
                                 config = Glm4MoeConfig.from_pretrained(model_name, trust_remote_code=True)
+                                
+                                # Instantiating model directly to bypass AutoModel's remote code check
+                                from transformers import Glm4MoeForCausalLM
+                                logger.info("Instantiating Glm4MoeForCausalLM directly to bypass missing remote code")
+                                model = Glm4MoeForCausalLM.from_pretrained(
+                                    model_name,
+                                    config=config,
+                                    device_map="auto",
+                                    trust_remote_code=True,
+                                    local_files_only=local_only,
+                                    quantization_config=quantization_config,
+                                )
+                                # Skip the AutoModelForCausalLM call below
+                                return model 
                             except ImportError:
-                                logger.warning("Glm4MoeConfig not found in transformers, trying fallback")
+                                logger.warning("Glm4MoeConfig/Glm4MoeForCausalLM not found in transformers, trying fallback")
                                 # Fallback to generic config but with correct model_type
                                 from transformers import PretrainedConfig
                                 config = PretrainedConfig(

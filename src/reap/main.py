@@ -806,11 +806,25 @@ def reload_model_in_full_precision(
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             device_map="auto",
-            dtype=torch.bfloat16,  # Force bfloat16
+            torch_dtype=torch.bfloat16,  # Force bfloat16
             trust_remote_code=True,
             local_files_only=local_only,
             quantization_config=final_quant_config,  # Use the correct config
         )
+    except TypeError as dtype_error:
+        # Some models with custom code don't accept torch_dtype parameter
+        if "unexpected keyword argument" in str(dtype_error):
+            logger.warning(f"Model doesn't accept torch_dtype parameter: {dtype_error}")
+            logger.info("Retrying without torch_dtype...")
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                device_map="auto",
+                trust_remote_code=True,
+                local_files_only=local_only,
+                quantization_config=final_quant_config,
+            )
+        else:
+            raise
     except OSError as model_load_error:
         # Handle config detection issues
         if "does not appear to have a file named configuration" in str(model_load_error):
@@ -899,15 +913,28 @@ def reload_model_in_full_precision(
                     local_files_only=local_only,
                 )
             
-            model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                config=config,
-                device_map="auto",
-                dtype=torch.bfloat16,
-                trust_remote_code=True,
-                local_files_only=local_only,
-                quantization_config=final_quant_config,  # Use the correct config
-            )
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    config=config,
+                    device_map="auto",
+                    torch_dtype=torch.bfloat16,
+                    trust_remote_code=True,
+                    local_files_only=local_only,
+                    quantization_config=final_quant_config,
+                )
+            except TypeError as inner_dtype_error:
+                if "unexpected keyword argument" in str(inner_dtype_error):
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        config=config,
+                        device_map="auto",
+                        trust_remote_code=True,
+                        local_files_only=local_only,
+                        quantization_config=final_quant_config,
+                    )
+                else:
+                    raise
         else:
             raise
     
@@ -1086,11 +1113,25 @@ def main():
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
             device_map="auto",
-            dtype="auto",
+            torch_dtype="auto",
             trust_remote_code=True,
             local_files_only=local_only,
             quantization_config=quantization_config,
         )
+    except TypeError as dtype_error:
+        # Some models with custom code don't accept torch_dtype parameter
+        if "unexpected keyword argument" in str(dtype_error):
+            logger.warning(f"Model doesn't accept torch_dtype parameter: {dtype_error}")
+            logger.info("Retrying without torch_dtype...")
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                device_map="auto",
+                trust_remote_code=True,
+                local_files_only=local_only,
+                quantization_config=quantization_config,
+            )
+        else:
+            raise
     except OSError as model_load_error:
         # Handle cases like PrimeIntellect/INTELLECT-3 where config detection fails
         if "does not appear to have a file named configuration" in str(model_load_error):

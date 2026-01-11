@@ -263,6 +263,9 @@ def create_combined_dataset(samples_per_dataset: int = 50):
                 raw_ds = load_dataset(
                     "json", data_files={"train": file_url}, split="train", streaming=False
                 )
+            elif dataset_name == "SWE-bench/SWE-smith-trajectories":
+                # This dataset uses 'tool' split instead of 'train'
+                raw_ds = load_dataset(dataset_name, split="tool")
             else:
                 raw_ds = load_dataset(dataset_name, split="train")
             

@@ -604,58 +604,25 @@ def main():
         quantization_config = None
     
     # --- FIX 3: Handle model loading with fallback for config detection issues ---
-    # Pre-load config to handle quantization_config serialization bug in some models
-    model_config = None
-    try:
-        from transformers import AutoConfig
-        import logging
-        # Temporarily suppress transformers logging to avoid serialization bug
-        transformers_logger = logging.getLogger("transformers.configuration_utils")
-        old_level = transformers_logger.level
-        transformers_logger.setLevel(logging.ERROR)
-        try:
-            model_config = AutoConfig.from_pretrained(
-                model_name,
-                trust_remote_code=True,
-                local_files_only=local_only,
-            )
-        except AttributeError as config_attr_err:
-            if "NoneType" in str(config_attr_err) and "to_dict" in str(config_attr_err):
-                logger.warning("Transformers config serialization bug detected, loading config with workaround")
-                # Load config dict directly and create config without triggering logging
-                import json
-                from huggingface_hub import hf_hub_download
-                config_file = hf_hub_download(
-                    model_name, 
-                    "config.json", 
-                    local_files_only=local_only
-                )
-                with open(config_file, "r") as f:
-                    config_dict = json.load(f)
-                # Get the config class
-                from transformers.models.auto.configuration_auto import CONFIG_MAPPING
-                model_type = config_dict.get("model_type", None)
-                if model_type and model_type in CONFIG_MAPPING:
-                    config_class = CONFIG_MAPPING[model_type]
-                    model_config = config_class(**config_dict)
-            else:
-                raise
-        finally:
-            transformers_logger.setLevel(old_level)
-    except Exception as config_error:
-        logger.warning(f"Could not pre-load config: {config_error}")
+    # Suppress transformers config logging to avoid serialization bug in some models
+    import logging as std_logging
+    transformers_config_logger = std_logging.getLogger("transformers.configuration_utils")
+    old_config_level = transformers_config_logger.level
+    transformers_config_logger.setLevel(std_logging.ERROR)
     
     try:
         load_kwargs = {
             "device_map": "auto",
-            "torch_dtype": "auto",
             "trust_remote_code": True,
             "local_files_only": local_only,
         }
-        if quantization_config is not None:
-            load_kwargs["quantization_config"] = quantization_config
-        if model_config is not None:
-            load_kwargs["config"] = model_config
+        
+        # For pre-quantized FP8 models, don't pass any quantization config or dtype
+        # Let the model's native loading handle everything
+        if not is_pre_quantized:
+            load_kwargs["torch_dtype"] = "auto"
+            if quantization_config is not None:
+                load_kwargs["quantization_config"] = quantization_config
             
         model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
     except TypeError as dtype_error:
@@ -680,6 +647,27 @@ def main():
             )
         else:
             raise
+    except RuntimeError as runtime_error:
+        # Handle FP8 weight loading issues for pre-quantized models
+        if "size mismatch" in str(runtime_error) and "weight_scale" in str(runtime_error):
+            logger.warning(f"FP8 weight loading issue detected: {runtime_error}")
+            logger.info("This model may require a specific transformers/torch version for FP8 support.")
+            logger.info("Trying to load without device_map for manual placement...")
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    trust_remote_code=True,
+                    local_files_only=local_only,
+                    low_cpu_mem_usage=False,
+                )
+                model = model.to("cuda")
+            except Exception as fallback_error:
+                logger.error(f"Fallback loading also failed: {fallback_error}")
+                raise runtime_error
+        else:
+            raise
+    finally:
+        transformers_config_logger.setLevel(old_config_level)
     except OSError as model_load_error:
         # Handle cases like PrimeIntellect/INTELLECT-3 where config detection fails
         if "does not appear to have a file named configuration" in str(model_load_error):

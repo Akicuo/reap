@@ -112,18 +112,19 @@ def _env_flag(name: str, default: bool) -> bool:
 
 def create_combined_dataset(samples_per_dataset: int = 50):
     """
-    Create a combined dataset from the three coding agent datasets.
-    Returns a combined dataset with 50 samples from each dataset.
+    Create a combined dataset from coding and math datasets.
+    Returns a combined dataset with samples from each dataset.
     """
-    coding_datasets = [
+    combined_datasets = [
         "theblackcat102/evol-codealpaca-v1",
         "Salesforce/xlam-function-calling-60k", 
-        "SWE-bench/SWE-smith-trajectories"
+        "SWE-bench/SWE-smith-trajectories",
+        "allenai/tulu-3-sft-personas-math",
     ]
     
     combined_samples = []
     
-    for dataset_name in coding_datasets:
+    for dataset_name in combined_datasets:
         logger.info(f"Loading {samples_per_dataset} samples from {dataset_name}...")
         try:
             if dataset_name == "allenai/c4":
@@ -180,7 +181,12 @@ def record_activations(
             
             # Use the CodeAlpacaChatDataset processor as the base since all are chat datasets
             from reap.data import CodeAlpacaChatDataset
-            processor = CodeAlpacaChatDataset(
+            
+            # Create a custom processor with source_dataset as category field
+            class CombinedDatasetProcessor(CodeAlpacaChatDataset):
+                category_field: str = "source_dataset"
+            
+            processor = CombinedDatasetProcessor(
                 dataset=combined_dataset,
                 tokenizer=tokenizer,
                 max_input_len=obs_args.model_max_length,
@@ -255,6 +261,8 @@ def record_activations(
                 logger.info("Processing combined dataset samples...")
                 for category, cat_data in category_data_batches.items():
                     logger.info(f"Processing category: {category}...")
+                    # Set category for per-category expert frequency tracking
+                    observer.set_category(category)
                     for sample in tqdm(cat_data, desc=f"Processing {category} samples"):
                         model(sample.to(model.device))
             except Exception as e:
@@ -364,6 +372,9 @@ def record_activations(
         with torch.no_grad():
             for category, cat_data in category_data_batches.items():
                 logger.info(f"Processing category: {category}...")
+                # Set category for per-category expert frequency tracking
+                observer.set_category(category)
+                
                 cat_dir = results_dir / str_to_directory_name(category)
                 cat_dir.mkdir(parents=True, exist_ok=True)
                 f_name = cat_dir / obs_args.output_file_name

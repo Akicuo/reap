@@ -25,6 +25,147 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+# --- Expert Pruning Report Types ---
+
+def _clean_category_name(category: str) -> str:
+    """Convert dataset names to cleaner display names."""
+    # Map of known dataset names to cleaner display names
+    category_display_map = {
+        "theblackcat102/evol-codealpaca-v1": "Coding",
+        "Salesforce/xlam-function-calling-60k": "FunctionCalling",
+        "SWE-bench/SWE-smith-trajectories": "SWE-Bench",
+        "m-a-p/CodeFeedback-Filtered-Instruction": "CodeFeedback",
+        "ise-uiuc/Magicoder-Evol-Instruct-110K": "Magicoder",
+        "allenai/c4": "C4-General",
+        "euclaise/WritingPrompts_curated": "Writing",
+        "allenai/tulu-3-sft-personas-math": "Math",
+    }
+    
+    if category in category_display_map:
+        return category_display_map[category]
+    
+    # Try to extract a cleaner name from the path
+    if "/" in category:
+        # Take the part after the slash and clean it up
+        name = category.split("/")[-1]
+        # Remove common suffixes
+        for suffix in ["-Instruct", "-v1", "-110K", "-60k", "-curated"]:
+            name = name.replace(suffix, "")
+        return name.replace("-", "_").replace("_", " ").title().replace(" ", "")
+    
+    return category
+
+
+@dataclass
+class ExpertPruningInfo:
+    """Information about a single expert's pruning decision."""
+    layer_idx: int
+    expert_idx: int
+    activation_count: int
+    pruned: bool
+    classification: str = "unknown"
+    saliency_score: float = 0.0
+    
+    def to_dict(self) -> dict:
+        return {
+            "layer": self.layer_idx,
+            "expert_idx": self.expert_idx,
+            "activation_count": self.activation_count,
+            "pruned": "Y" if self.pruned else "N",
+            "classification": _clean_category_name(self.classification),
+            "saliency_score": self.saliency_score,
+        }
+
+
+@dataclass 
+class LayerPruningReport:
+    """Pruning report for a single layer."""
+    layer_idx: int
+    experts: list[ExpertPruningInfo]
+    total_tokens: int
+    n_pruned: int
+    n_retained: int
+    
+    def to_markdown(self) -> str:
+        """Generate markdown table for this layer."""
+        lines = [
+            f"### Layer {self.layer_idx}",
+            f"",
+            f"**Total Tokens Processed:** {self.total_tokens:,}",
+            f"**Experts Pruned:** {self.n_pruned} | **Retained:** {self.n_retained}",
+            f"",
+            "| Expert Index | Counts of Activation | Pruned? (Y or N) | Classification | Saliency Score |",
+            "|--------------|---------------------|------------------|----------------|----------------|",
+        ]
+        for expert in sorted(self.experts, key=lambda e: e.expert_idx):
+            clean_classification = _clean_category_name(expert.classification)
+            lines.append(
+                f"| {expert.expert_idx} | {expert.activation_count:,} | "
+                f"{('Y' if expert.pruned else 'N')} | {clean_classification} | "
+                f"{expert.saliency_score:.4f} |"
+            )
+        return "\n".join(lines)
+
+
+@dataclass
+class PruningReport:
+    """Complete pruning report across all layers."""
+    model_name: str
+    prune_method: str
+    compression_ratio: float
+    total_experts_before: int
+    total_experts_after: int
+    layers: list[LayerPruningReport]
+    category_expert_map: Optional[dict] = None
+    
+    def to_markdown(self) -> str:
+        """Generate full markdown report."""
+        lines = [
+            "# Expert Pruning Report",
+            "",
+            f"**Model:** {self.model_name}",
+            f"**Pruning Method:** {self.prune_method}",
+            f"**Compression Ratio:** {self.compression_ratio:.2%}",
+            f"**Total Experts Before:** {self.total_experts_before}",
+            f"**Total Experts After:** {self.total_experts_after}",
+            "",
+            "---",
+            "",
+        ]
+        
+        for layer_report in self.layers:
+            lines.append(layer_report.to_markdown())
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+        
+        # Summary statistics
+        lines.extend([
+            "## Summary Statistics",
+            "",
+            "| Layer | Pruned Count | Retained Count | Pruning Rate |",
+            "|-------|--------------|----------------|--------------|",
+        ])
+        for layer_report in self.layers:
+            total = layer_report.n_pruned + layer_report.n_retained
+            rate = layer_report.n_pruned / total if total > 0 else 0
+            lines.append(
+                f"| {layer_report.layer_idx} | {layer_report.n_pruned} | "
+                f"{layer_report.n_retained} | {rate:.2%} |"
+            )
+        
+        return "\n".join(lines)
+    
+    def save(self, file_path: str | pathlib.Path):
+        """Save report to markdown file."""
+        if isinstance(file_path, str):
+            file_path = pathlib.Path(file_path)
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(self.to_markdown())
+        logger.info(f"Pruning report saved to {file_path}")
+
+
 class BaseTransformerObserverHookConfig:
     state_attr_name: str = "hook_state"
     hook_attr_name: str = "hooks"
@@ -222,23 +363,88 @@ class MoETransformerObserverConfig(BaseTransformerObserverHookConfig):
     distance_measure: str = "angular"
     renormalize_router_weights: bool = False
     record_pruning_metrics_only: bool = False
+    track_category_expert_frequency: bool = True  # Track which categories activate which experts
 
 
 class MoETransformerObserver(BaseTransformerObserver):
     """MoE Transformer Observer for all methods including both pruning and merging."""
+    
+    def __init__(self, model, hook_config=None):
+        self._current_category: Optional[str] = None
+        self._category_expert_frequency: dict[str, dict[int, torch.Tensor]] = {}
+        super().__init__(model, hook_config)
+    
+    def set_category(self, category: str):
+        """Set the current category being processed for category-aware tracking."""
+        self._current_category = category
+        if category not in self._category_expert_frequency:
+            self._category_expert_frequency[category] = {}
+    
+    def get_category_expert_frequency(self) -> dict[str, dict[int, torch.Tensor]]:
+        """Get the per-category expert frequency mapping."""
+        return self._category_expert_frequency
+    
+    def get_dominant_category_per_expert(self) -> dict[int, dict[int, str]]:
+        """
+        For each layer and expert, return the category that activated it the most.
+        
+        Returns:
+            Dict mapping layer_idx -> expert_idx -> dominant_category
+        """
+        result: dict[int, dict[int, str]] = {}
+        
+        if not self._category_expert_frequency:
+            return result
+        
+        # Get all layers
+        all_layers = set()
+        for cat_data in self._category_expert_frequency.values():
+            all_layers.update(cat_data.keys())
+        
+        for layer_idx in sorted(all_layers):
+            result[layer_idx] = {}
+            
+            # Get number of experts from any category that has this layer
+            num_experts = 0
+            for cat_data in self._category_expert_frequency.values():
+                if layer_idx in cat_data:
+                    num_experts = len(cat_data[layer_idx])
+                    break
+            
+            for expert_idx in range(num_experts):
+                max_count = 0
+                dominant_cat = "unknown"
+                
+                for category, cat_data in self._category_expert_frequency.items():
+                    if layer_idx in cat_data:
+                        freq = cat_data[layer_idx]
+                        if expert_idx < len(freq):
+                            count = freq[expert_idx].item()
+                            if count > max_count:
+                                max_count = count
+                                dominant_cat = category
+                
+                result[layer_idx][expert_idx] = dominant_cat
+        
+        return result
 
     def report_state(self) -> dict[str, Any]:
         """
         Method to report the current state of the observer. Can be overridden to inject
         custom behaviours.
         """
-        return {
+        result = {
             layer_num: {
                 k: v.mean if isinstance(v, OnlineStatsTracker) else v
                 for k, v in layer_state.items()
             }
             for layer_num, layer_state in self.state.items()
         }
+        # Include category-expert frequency map if available
+        if self._category_expert_frequency:
+            result["__category_expert_frequency__"] = self._category_expert_frequency
+            result["__dominant_category_per_expert__"] = self.get_dominant_category_per_expert()
+        return result
 
     def _initialize_state(self, output: torch.Tensor, num_experts: int):
         # get device and shape info
@@ -449,6 +655,20 @@ class MoETransformerObserver(BaseTransformerObserver):
             self.state[layer_number]["pairwise_expert_frequency"] += (
                 pairwise_expert_frequency.to("cpu", torch.long)
             )
+            
+            # Track per-category expert frequency if category is set
+            if (self.hook_config.track_category_expert_frequency and 
+                self._current_category is not None):
+                cat = self._current_category
+                if cat not in self._category_expert_frequency:
+                    self._category_expert_frequency[cat] = {}
+                if layer_number not in self._category_expert_frequency[cat]:
+                    self._category_expert_frequency[cat][layer_number] = torch.zeros(
+                        num_experts, device="cpu", dtype=torch.long
+                    )
+                self._category_expert_frequency[cat][layer_number] += expert_frequency.to(
+                    "cpu", torch.long
+                )
 
             # Merging critera
             if not self.hook_config.record_pruning_metrics_only:
@@ -674,6 +894,15 @@ class VaetkiForCausalLMObserverHookConfig(MoETransformerObserverConfig):
     fused_experts: bool = False
 
 
+@dataclass
+class MiMoV2FlashObserverHookConfig(MoETransformerObserverConfig):
+    """Observer config for XiaomiMiMo/MiMo-V2-Flash - 309B MoE model."""
+    module_class_name_to_hook_regex: Optional[str] = "MiMoV2FlashMoE"
+    num_experts_attr_name: str = "num_experts"
+    top_k_attr_name: str = "num_experts_per_tok"
+    fused_experts: bool = False
+
+
 def _infer_moe_class_name(model) -> str | None:
     """Infer the MoE block class name by inspecting the model structure."""
     moe_patterns = ["MoE", "SparseMoeBlock", "MoeBlock", "MoeMLP", "ExpertLayer"]
@@ -758,6 +987,112 @@ def _detect_fused_experts(model) -> bool:
     return False
 
 
+def generate_pruning_report(
+    observer_data: dict[int, dict[str, Any]],
+    experts_to_prune_per_layer: dict[int, torch.Tensor],
+    model_name: str,
+    prune_method: str,
+    category_expert_map: Optional[dict[int, dict[int, str]]] = None,
+) -> PruningReport:
+    """
+    Generate a detailed pruning report showing which experts were pruned.
+    
+    Args:
+        observer_data: Observer state dictionary containing expert frequencies and saliency metrics
+        experts_to_prune_per_layer: Dict mapping layer_idx -> tensor of expert indices to prune
+        model_name: Name of the model being pruned
+        prune_method: The pruning method used (e.g., "frequency", "reap", "ean_sum")
+        category_expert_map: Optional mapping of layer_idx -> expert_idx -> category name
+    
+    Returns:
+        PruningReport object containing detailed per-expert pruning decisions
+    """
+    layer_reports = []
+    total_experts_before = 0
+    total_experts_after = 0
+    
+    for layer_idx in sorted(observer_data.keys()):
+        layer_data = observer_data[layer_idx]
+        expert_frequency = layer_data["expert_frequency"]
+        total_tokens = layer_data["total_tokens"].item() if isinstance(layer_data["total_tokens"], torch.Tensor) else layer_data["total_tokens"]
+        num_experts = len(expert_frequency)
+        
+        # Get experts to prune for this layer
+        pruned_experts = set()
+        if layer_idx in experts_to_prune_per_layer:
+            pruned_tensor = experts_to_prune_per_layer[layer_idx]
+            if isinstance(pruned_tensor, torch.Tensor):
+                pruned_experts = set(pruned_tensor.tolist())
+            else:
+                pruned_experts = set(pruned_tensor)
+        
+        # Get saliency scores based on prune method
+        saliency_key = prune_method
+        if prune_method == "frequency":
+            saliency_key = "expert_frequency"
+        
+        saliency_data = layer_data.get(saliency_key, expert_frequency)
+        if isinstance(saliency_data, OnlineStatsTracker):
+            saliency_data = saliency_data.mean
+        
+        # Build expert info list
+        expert_infos = []
+        for expert_idx in range(num_experts):
+            # Get activation count
+            activation_count = expert_frequency[expert_idx].item() if isinstance(
+                expert_frequency[expert_idx], torch.Tensor
+            ) else int(expert_frequency[expert_idx])
+            
+            # Get classification from category map
+            classification = "unknown"
+            if category_expert_map and layer_idx in category_expert_map:
+                classification = category_expert_map[layer_idx].get(expert_idx, "unknown")
+            
+            # Get saliency score
+            saliency_score = 0.0
+            if saliency_data is not None and expert_idx < len(saliency_data):
+                score = saliency_data[expert_idx]
+                saliency_score = score.item() if isinstance(score, torch.Tensor) else float(score)
+            
+            expert_info = ExpertPruningInfo(
+                layer_idx=layer_idx,
+                expert_idx=expert_idx,
+                activation_count=activation_count,
+                pruned=expert_idx in pruned_experts,
+                classification=classification,
+                saliency_score=saliency_score,
+            )
+            expert_infos.append(expert_info)
+        
+        n_pruned = len(pruned_experts)
+        n_retained = num_experts - n_pruned
+        
+        layer_report = LayerPruningReport(
+            layer_idx=layer_idx,
+            experts=expert_infos,
+            total_tokens=total_tokens,
+            n_pruned=n_pruned,
+            n_retained=n_retained,
+        )
+        layer_reports.append(layer_report)
+        
+        total_experts_before += num_experts
+        total_experts_after += n_retained
+    
+    # Calculate compression ratio
+    compression_ratio = 1 - (total_experts_after / total_experts_before) if total_experts_before > 0 else 0
+    
+    return PruningReport(
+        model_name=model_name,
+        prune_method=prune_method,
+        compression_ratio=compression_ratio,
+        total_experts_before=total_experts_before,
+        total_experts_after=total_experts_after,
+        layers=layer_reports,
+        category_expert_map=category_expert_map,
+    )
+
+
 def ensure_observer_config(model) -> bool:
     """
     Ensure a model has an observer config registered.
@@ -836,4 +1171,6 @@ OBSERVER_CONFIG_REGISTRY = {
     "MiniMaxForCausalLM": DeepSeekMoEObserverHookConfig,
     # Kimi-K2-Thinking - DeepSeek V3 based
     "KimiK2ForCausalLM": DeepSeekMoEObserverHookConfig,
+    # XiaomiMiMo/MiMo-V2-Flash - 309B MoE model
+    "MiMoV2FlashForCausalLM": MiMoV2FlashObserverHookConfig,
 }

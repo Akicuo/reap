@@ -35,7 +35,7 @@ from reap.cluster import (
     dynamic_frequency_penalized_clustering,
 )
 from reap.model_util import get_moe, assert_merge, MODEL_ATTRS, patched_model_map, get_super_expert_indices, ensure_model_registered
-from reap.observer import ensure_observer_config
+from reap.observer import ensure_observer_config, generate_pruning_report
 from reap.models.auto_patch import auto_patch_moe, patch_specific_model, needs_patching
 from reap.eval import run_evaluate
 import shutil
@@ -99,11 +99,28 @@ def prune(
     prune_args,
     n_experts_to_prune,
     pruned_model_dir,
+    category_expert_map: dict = None,
 ):
     """
     Prune the model based on the observer data and clustering.
+    
+    Args:
+        observer_data: Dictionary containing observer metrics per layer
+        model: The model to prune
+        tokenizer: The tokenizer
+        reap_args: Reap configuration arguments
+        prune_args: Pruning configuration arguments
+        n_experts_to_prune: Number of experts to prune per layer
+        pruned_model_dir: Directory to save the pruned model
+        category_expert_map: Optional mapping of layer_idx -> expert_idx -> category name
+    
+    Returns:
+        pruned_model_dir: Path to the pruned model directory
     """
     model_attrs = MODEL_ATTRS[model.__class__.__name__]
+    
+    # Track which experts are pruned per layer for the report
+    experts_to_prune_per_layer: dict[int, torch.Tensor] = {}
 
     for layer in observer_data:
         if "expert_proba" not in observer_data[layer]:
@@ -154,6 +171,9 @@ def prune(
             _, experts_to_prune = torch.topk(
                 saliency_data, n_experts_to_prune, largest=False
             )
+        
+        # Store experts to prune for the report
+        experts_to_prune_per_layer[layer] = experts_to_prune.clone()
 
         retained_expert_indicies = [
             i for i in range(num_experts) if i not in experts_to_prune
@@ -215,6 +235,23 @@ def prune(
     logger.info(
         f"Pruned model saved to {pruned_model_dir} in {end - start:.2f} seconds"
     )
+    
+    # Generate and save pruning report
+    logger.info("Generating pruning report...")
+    try:
+        pruning_report = generate_pruning_report(
+            observer_data=observer_data,
+            experts_to_prune_per_layer=experts_to_prune_per_layer,
+            model_name=model.__class__.__name__,
+            prune_method=prune_args.prune_method,
+            category_expert_map=category_expert_map,
+        )
+        report_path = pruned_model_dir / "pruning_report.md"
+        pruning_report.save(report_path)
+        logger.info(f"Pruning report saved to {report_path}")
+    except Exception as e:
+        logger.warning(f"Failed to generate pruning report: {e}")
+    
     return pruned_model_dir
 
 
@@ -812,6 +849,13 @@ def main():
         ensure_model_registered(model)
         ensure_observer_config(model)
         
+        # Extract category-expert map from observer data if available
+        category_expert_map = None
+        if "__dominant_category_per_expert__" in observer_data:
+            category_expert_map = observer_data.pop("__dominant_category_per_expert__")
+            # Also remove the raw category frequency data as it's not needed for pruning
+            observer_data.pop("__category_expert_frequency__", None)
+        
         prune(
             observer_data,
             model,
@@ -820,6 +864,7 @@ def main():
             prune_args,
             n_experts_to_prune,
             pruned_model_dir,
+            category_expert_map=category_expert_map,
         )
         logger.info("pruning completed.")
 

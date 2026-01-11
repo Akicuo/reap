@@ -138,6 +138,18 @@ MODEL_ATTRS = {
         "num_experts": "n_routed_experts",
         "num_experts_per_tok": "num_experts_per_tok",
     },
+    # XiaomiMiMo/MiMo-V2-Flash - 309B MoE model
+    "MiMoV2FlashForCausalLM": {
+        "moe_block": "mlp",
+        "gate_proj": "gate_proj",
+        "up_proj": "up_proj",
+        "down_proj": "down_proj",
+        "experts": "experts",
+        "fused": False,
+        "router": "gate",
+        "num_experts": "num_experts",
+        "num_experts_per_tok": "num_experts_per_tok",
+    },
     # PrimeIntellect/INTELLECT-3 - DeepSeek V3 based architecture
     "DeepseekV3ForCausalLM": {
         "moe_block": "mlp",

@@ -506,7 +506,8 @@ class PruneArgs:
                 "weighted_ean_sum_l2",
                 "reap",
                 "reap_l2",
-                "max_activations"
+                "max_activations",
+                "under_average"
             ]
         },
     )

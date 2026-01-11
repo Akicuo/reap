@@ -4,6 +4,7 @@ import logging
 import dataclasses
 import pathlib
 import time
+import math
 from typing import Any
 import gc
 import yaml
@@ -283,7 +284,38 @@ def prune(
 
     for layer in tqdm(observer_data, "Pruning layers..."):
         num_experts = observer_data[layer]["expert_frequency"].shape[0]
-        if prune_args.prune_method == "ean_ca":
+        if prune_args.prune_method == "under_average":
+            # Under-average pruning: prune all experts with activation count below average
+            # Example: experts with counts [22, 16, 14, 1] -> avg = ceil(53/4) = 14
+            # Expert 4 (count=1) is below 14, so it gets pruned
+            expert_frequency = observer_data[layer]["expert_frequency"]
+            if isinstance(expert_frequency, torch.Tensor):
+                freq_values = expert_frequency.float()
+            else:
+                freq_values = torch.tensor(expert_frequency, dtype=torch.float32)
+            
+            total_activations = freq_values.sum().item()
+            # Round UP to next integer (ceiling)
+            average_threshold = math.ceil(total_activations / num_experts)
+            
+            # Find all experts below average
+            below_average_mask = freq_values < average_threshold
+            experts_to_prune = torch.where(below_average_mask)[0]
+            
+            # Ensure we don't prune ALL experts - keep at least 1
+            if len(experts_to_prune) >= num_experts:
+                # Keep the expert with highest frequency
+                _, best_expert = torch.topk(freq_values, 1, largest=True)
+                experts_to_prune = torch.tensor(
+                    [i for i in range(num_experts) if i != best_expert.item()],
+                    device=freq_values.device
+                )
+            
+            logger.info(
+                f"Layer {layer}: avg threshold={average_threshold}, "
+                f"pruning {len(experts_to_prune)}/{num_experts} experts below average"
+            )
+        elif prune_args.prune_method == "ean_ca":
             ean = torch.zeros(num_experts, device=model.device, dtype=torch.float32)
             for i in range(num_experts):
                 ean[i] = torch.linalg.norm(
@@ -389,13 +421,12 @@ def prune(
 
 def get_pruned_model_dir(
     results_dir,
-    n_experts_to_prune: str,
+    n_experts_to_prune: int | None,
     total_experts: int,
     prune_args,
     seed: int,
     renorm: bool,
 ) -> pathlib.Path:
-    compression_ratio_str = f"{(n_experts_to_prune / total_experts):.2f}"
     pruned_model_name = f"{prune_args.prune_method}"
     if prune_args.perserve_super_experts:
         pruned_model_name += "-perserve_super"
@@ -404,7 +435,14 @@ def get_pruned_model_dir(
     if renorm:
         pruned_model_name += f"-renorm_{str(renorm).lower()}"
     pruned_model_name += f"-seed_{seed}"
-    pruned_model_name += f"-{compression_ratio_str}"
+    
+    # For under_average, we don't have a fixed compression ratio
+    if prune_args.prune_method == "under_average":
+        pruned_model_name += "-dynamic"
+    else:
+        compression_ratio_str = f"{(n_experts_to_prune / total_experts):.2f}"
+        pruned_model_name += f"-{compression_ratio_str}"
+    
     pruned_model_dir = results_dir / "pruned_models" / pruned_model_name
     logger.info(f"Using seed {seed}, pruned model dir: {pruned_model_dir}")
     return pruned_model_dir
@@ -999,21 +1037,29 @@ def main():
 
     # pruning
     logger.info("Start of pruning")
-    n_experts_to_prune = prune_args.n_experts_to_prune
-    if n_experts_to_prune is None:
-        if cluster_args.compression_ratio is None:
-            raise ValueError(
-                "Either n_experts_to_prune or compression_ratio must be set for pruning."
-            )
-        else:
-            # Calculate n_experts_to_prune from compression_ratio
-            total_experts = len(
-                observer_data[next(iter(observer_data))]["expert_frequency"]
-            )
-            n_experts_to_prune = int(total_experts * cluster_args.compression_ratio)
-            logger.info(
-                f"Calculated n_experts to prune: {n_experts_to_prune} from compression_ratio: {cluster_args.compression_ratio}"
-            )
+    total_experts = len(
+        observer_data[next(iter(observer_data))]["expert_frequency"]
+    )
+    
+    # under_average method doesn't use fixed n_experts_to_prune - it's determined per layer
+    if prune_args.prune_method == "under_average":
+        n_experts_to_prune = None  # Will be determined dynamically per layer
+        logger.info(
+            "Using under_average pruning: experts below average activation count will be pruned per layer"
+        )
+    else:
+        n_experts_to_prune = prune_args.n_experts_to_prune
+        if n_experts_to_prune is None:
+            if cluster_args.compression_ratio is None:
+                raise ValueError(
+                    "Either n_experts_to_prune or compression_ratio must be set for pruning."
+                )
+            else:
+                # Calculate n_experts_to_prune from compression_ratio
+                n_experts_to_prune = int(total_experts * cluster_args.compression_ratio)
+                logger.info(
+                    f"Calculated n_experts to prune: {n_experts_to_prune} from compression_ratio: {cluster_args.compression_ratio}"
+                )
 
     pruned_model_dir = get_pruned_model_dir(
         results_dir, n_experts_to_prune, total_experts, prune_args, reap_args.seed, obs_args.renormalize_router_weights

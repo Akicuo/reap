@@ -783,23 +783,11 @@ def reload_model_in_full_precision(
         logger.warning(f"Could not check for pre-quantization: {config_error}")
     
     # Determine the correct quantization config to use
+    # For pre-quantized models (FP8, etc.), don't pass quantization_config
+    # Let transformers handle it automatically from the model's config
     final_quant_config = None
     if is_pre_quantized:
-        logger.info("Model is pre-quantized, using original quantization config for reload")
-        final_quant_config = pre_quant_config
-        # Convert dict to proper class if needed
-        if isinstance(final_quant_config, dict):
-            try:
-                from transformers import CompressedTensorsConfig
-                if 'format' in final_quant_config and final_quant_config['format'] == 'pack-quantized':
-                    final_quant_config = CompressedTensorsConfig.from_dict(final_quant_config)
-            except ImportError:
-                logger.warning("CompressedTensorsConfig not available, using original config dict")
-            except Exception:
-                logger.warning("Could not convert quantization config to CompressedTensorsConfig, using original")
-    else:
-        # No additional quantization needed if not pre-quantized
-        final_quant_config = None
+        logger.info("Model is pre-quantized, will load with native quantization (no extra config needed)")
     
     # For pre-quantized models, we still load without additional quantization
     try:
@@ -1092,21 +1080,10 @@ def main():
             )
             quantization_config = None
     elif is_pre_quantized:
-        logger.info("Model is pre-quantized, using original quantization config")
-        # Use the original quantization config directly to avoid class mismatch issues
-        quantization_config = pre_quant_config
-        # But we need to ensure we pass the correct class type
-        # If quantization_config is a dict (like in Kimi-K2), try to convert it
-        if isinstance(quantization_config, dict):
-            try:
-                # Try to import CompressedTensorsConfig if available
-                from transformers import CompressedTensorsConfig
-                if 'format' in quantization_config and quantization_config['format'] == 'pack-quantized':
-                    quantization_config = CompressedTensorsConfig.from_dict(quantization_config)
-            except ImportError:
-                logger.warning("CompressedTensorsConfig not available, using original config dict")
-            except Exception:
-                logger.warning("Could not convert quantization config to CompressedTensorsConfig, using original")
+        logger.info("Model is pre-quantized, will load with native quantization (no extra config needed)")
+        # For pre-quantized models (FP8, etc.), don't pass quantization_config
+        # Let transformers handle it automatically from the model's config
+        quantization_config = None
     
     # --- FIX 3: Handle model loading with fallback for config detection issues ---
     try:

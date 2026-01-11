@@ -1148,8 +1148,6 @@ def main():
                 raise runtime_error
         else:
             raise
-    finally:
-        transformers_config_logger.setLevel(old_config_level)
     except OSError as model_load_error:
         # Handle cases like PrimeIntellect/INTELLECT-3 where config detection fails
         if "does not appear to have a file named configuration" in str(model_load_error):
@@ -1274,6 +1272,8 @@ def main():
             )
         else:
             raise
+    finally:
+        transformers_config_logger.setLevel(old_config_level)
     
     # --- AUTO-DETECTION AND PATCHING FOR UNSUPPORTED MODELS ---
     model_class_name = model.__class__.__name__

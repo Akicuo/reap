@@ -133,18 +133,35 @@ def load_model_with_vllm(model_name: str, local_only: bool = False):
     
     logger.info(f"Loading model '{model_name}' with vLLM...")
     
+    # Clear any existing CUDA memory before vLLM initialization
+    torch.cuda.empty_cache()
+    gc.collect()
+    
+    # Auto-detect number of GPUs for tensor parallelism
+    num_gpus = torch.cuda.device_count()
+    # Use power of 2 GPUs for tensor parallelism (1, 2, 4, 8)
+    if num_gpus >= 8:
+        tensor_parallel_size = 8
+    elif num_gpus >= 4:
+        tensor_parallel_size = 4
+    elif num_gpus >= 2:
+        tensor_parallel_size = 2
+    else:
+        tensor_parallel_size = 1
+    logger.info(f"Detected {num_gpus} GPUs, using tensor_parallel_size={tensor_parallel_size}")
+    
     try:
         # Create vLLM LLM instance - this handles FP8 loading automatically
         llm = LLM(
             model=model_name,
             trust_remote_code=True,
             dtype="auto",
-            # Use smaller tensor parallel for single GPU
-            tensor_parallel_size=1,
+            # Use tensor parallelism across available GPUs
+            tensor_parallel_size=tensor_parallel_size,
             # Disable CUDA graph to allow model access
             enforce_eager=True,
-            # Limit GPU memory usage
-            gpu_memory_utilization=0.85,
+            # Lower GPU memory utilization to avoid conflicts with previously initialized CUDA
+            gpu_memory_utilization=0.50,
         )
         
         # Try to extract the underlying model

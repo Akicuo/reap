@@ -110,6 +110,120 @@ def _env_flag(name: str, default: bool) -> bool:
     return val.strip().lower() not in ("0", "false", "no", "off", "")
 
 
+def load_model_with_vllm(model_name: str, local_only: bool = False):
+    """
+    Load a model using vLLM and extract the underlying HuggingFace model.
+    
+    This is useful for FP8 pre-quantized models that are designed for vLLM
+    and cannot be loaded directly with transformers.
+    
+    Args:
+        model_name: HuggingFace model name or path
+        local_only: Whether to only use local files
+        
+    Returns:
+        The underlying model that can be used for pruning, or None if vLLM is not available
+    """
+    try:
+        from vllm import LLM
+        from vllm.model_executor.models import ModelRegistry
+    except ImportError:
+        logger.warning("vLLM is not installed. Install with: pip install vllm")
+        return None
+    
+    logger.info(f"Loading model '{model_name}' with vLLM...")
+    
+    try:
+        # Create vLLM LLM instance - this handles FP8 loading automatically
+        llm = LLM(
+            model=model_name,
+            trust_remote_code=True,
+            dtype="auto",
+            # Use smaller tensor parallel for single GPU
+            tensor_parallel_size=1,
+            # Disable CUDA graph to allow model access
+            enforce_eager=True,
+            # Limit GPU memory usage
+            gpu_memory_utilization=0.85,
+        )
+        
+        # Try to extract the underlying model
+        # vLLM stores the model in the model_executor
+        if hasattr(llm, 'llm_engine') and hasattr(llm.llm_engine, 'model_executor'):
+            model_executor = llm.llm_engine.model_executor
+            
+            # For single GPU, the model is directly accessible
+            if hasattr(model_executor, 'driver_worker'):
+                worker = model_executor.driver_worker
+                if hasattr(worker, 'model_runner') and hasattr(worker.model_runner, 'model'):
+                    vllm_model = worker.model_runner.model
+                    
+                    # The vLLM model wraps the HuggingFace model
+                    if hasattr(vllm_model, 'model'):
+                        hf_model = vllm_model.model
+                        logger.info(f"Extracted HuggingFace model: {hf_model.__class__.__name__}")
+                        
+                        # We need to wrap this in a way that's compatible with our pruning code
+                        # Create a wrapper class that mimics AutoModelForCausalLM behavior
+                        class VLLMModelWrapper(torch.nn.Module):
+                            def __init__(self, vllm_llm, inner_model):
+                                super().__init__()
+                                self._vllm_llm = vllm_llm  # Keep reference to prevent GC
+                                self._inner_model = inner_model
+                                # Copy attributes from inner model
+                                self.config = getattr(inner_model, 'config', None)
+                                self.device = next(inner_model.parameters()).device
+                                
+                            def __getattr__(self, name):
+                                if name.startswith('_') or name in ['config', 'device', 'forward', 'parameters', 'named_parameters', 'modules', 'named_modules', 'state_dict', 'load_state_dict']:
+                                    return super().__getattribute__(name)
+                                return getattr(self._inner_model, name)
+                            
+                            def forward(self, *args, **kwargs):
+                                return self._inner_model(*args, **kwargs)
+                            
+                            def parameters(self, recurse=True):
+                                return self._inner_model.parameters(recurse)
+                            
+                            def named_parameters(self, prefix='', recurse=True):
+                                return self._inner_model.named_parameters(prefix, recurse)
+                            
+                            def modules(self):
+                                return self._inner_model.modules()
+                            
+                            def named_modules(self, memo=None, prefix='', remove_duplicate=True):
+                                return self._inner_model.named_modules(memo, prefix, remove_duplicate)
+                            
+                            def state_dict(self, *args, **kwargs):
+                                return self._inner_model.state_dict(*args, **kwargs)
+                            
+                            def save_pretrained(self, save_directory, **kwargs):
+                                """Save the model in HuggingFace format."""
+                                os.makedirs(save_directory, exist_ok=True)
+                                
+                                # Save config if available
+                                if self.config is not None:
+                                    self.config.save_pretrained(save_directory)
+                                
+                                # Save model weights
+                                state_dict = self.state_dict()
+                                save_path = os.path.join(save_directory, "pytorch_model.bin")
+                                torch.save(state_dict, save_path)
+                                logger.info(f"Saved model weights to {save_path}")
+                        
+                        wrapper = VLLMModelWrapper(llm, hf_model)
+                        return wrapper
+        
+        logger.warning("Could not extract model from vLLM. Model structure may have changed.")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Failed to load model with vLLM: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def create_combined_dataset(samples_per_dataset: int = 50):
     """
     Create a combined dataset from coding and math datasets.
@@ -1133,19 +1247,36 @@ def main():
         # Handle FP8 weight loading issues for pre-quantized models
         if "size mismatch" in str(runtime_error) and "weight_scale" in str(runtime_error):
             logger.warning(f"FP8 weight loading issue detected: {runtime_error}")
-            logger.info("This model may require a specific transformers/torch version for FP8 support.")
-            logger.info("Trying to load without device_map for manual placement...")
+            logger.info("This model appears to be pre-quantized for vLLM. Attempting vLLM-based loading...")
+            
+            # Try vLLM-based loading for FP8 models
+            model = None
             try:
-                model = AutoModelForCausalLM.from_pretrained(
-                    model_name,
-                    trust_remote_code=True,
-                    local_files_only=local_only,
-                    low_cpu_mem_usage=False,
-                )
-                model = model.to("cuda")
-            except Exception as fallback_error:
-                logger.error(f"Fallback loading also failed: {fallback_error}")
-                raise runtime_error
+                model = load_model_with_vllm(model_name, local_only)
+                if model is not None:
+                    logger.info("Successfully loaded model via vLLM extraction")
+            except Exception as vllm_error:
+                logger.warning(f"vLLM loading failed: {vllm_error}")
+            
+            if model is None:
+                logger.info("Trying standard loading without device_map...")
+                try:
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_name,
+                        trust_remote_code=True,
+                        local_files_only=local_only,
+                        low_cpu_mem_usage=False,
+                    )
+                    model = model.to("cuda")
+                except Exception as fallback_error:
+                    logger.error(f"All loading methods failed.")
+                    logger.error(f"vLLM error: {vllm_error if 'vllm_error' in dir() else 'N/A'}")
+                    logger.error(f"Standard error: {fallback_error}")
+                    raise RuntimeError(
+                        f"Cannot load FP8 pre-quantized model '{model_name}'. "
+                        f"This model requires vLLM for inference. Install vLLM with: pip install vllm\n"
+                        f"Original error: {runtime_error}"
+                    )
         else:
             raise
     except OSError as model_load_error:

@@ -1086,26 +1086,79 @@ def main():
         quantization_config = None
     
     # --- FIX 3: Handle model loading with fallback for config detection issues ---
+    # Pre-load config to handle quantization_config serialization bug in some models
+    model_config = None
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            device_map="auto",
-            torch_dtype="auto",
-            trust_remote_code=True,
-            local_files_only=local_only,
-            quantization_config=quantization_config,
-        )
+        from transformers import AutoConfig
+        import logging as std_logging
+        # Temporarily suppress transformers logging to avoid serialization bug
+        transformers_logger = std_logging.getLogger("transformers.configuration_utils")
+        old_level = transformers_logger.level
+        transformers_logger.setLevel(std_logging.ERROR)
+        try:
+            model_config = AutoConfig.from_pretrained(
+                model_name,
+                trust_remote_code=True,
+                local_files_only=local_only,
+            )
+        except AttributeError as config_attr_err:
+            if "NoneType" in str(config_attr_err) and "to_dict" in str(config_attr_err):
+                logger.warning("Transformers config serialization bug detected, loading config with workaround")
+                # Load config dict directly and create config without triggering logging
+                import json
+                from huggingface_hub import hf_hub_download
+                config_file = hf_hub_download(
+                    model_name, 
+                    "config.json", 
+                    local_files_only=local_only
+                )
+                with open(config_file, "r") as f:
+                    config_dict = json.load(f)
+                # Get the config class
+                from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+                model_type = config_dict.get("model_type", None)
+                if model_type and model_type in CONFIG_MAPPING:
+                    config_class = CONFIG_MAPPING[model_type]
+                    model_config = config_class(**config_dict)
+            else:
+                raise
+        finally:
+            transformers_logger.setLevel(old_level)
+    except Exception as config_error:
+        logger.warning(f"Could not pre-load config: {config_error}")
+    
+    try:
+        load_kwargs = {
+            "device_map": "auto",
+            "torch_dtype": "auto",
+            "trust_remote_code": True,
+            "local_files_only": local_only,
+        }
+        if quantization_config is not None:
+            load_kwargs["quantization_config"] = quantization_config
+        if model_config is not None:
+            load_kwargs["config"] = model_config
+            
+        model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
     except TypeError as dtype_error:
         # Some models with custom code don't accept torch_dtype parameter
         if "unexpected keyword argument" in str(dtype_error):
             logger.warning(f"Model doesn't accept torch_dtype parameter: {dtype_error}")
             logger.info("Retrying without torch_dtype...")
+            load_kwargs.pop("torch_dtype", None)
+            model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
+        else:
+            raise
+    except AttributeError as attr_error:
+        # Handle bug in transformers where quantization_config.to_dict() is called on None
+        if "NoneType" in str(attr_error) and "to_dict" in str(attr_error):
+            logger.warning(f"Transformers config serialization bug detected: {attr_error}")
+            logger.info("Retrying with minimal parameters...")
             model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 device_map="auto",
                 trust_remote_code=True,
                 local_files_only=local_only,
-                quantization_config=quantization_config,
             )
         else:
             raise

@@ -250,10 +250,22 @@ class BaseDatasetProcessor(ABC):
         return processed_samples
 
 
+def _sanitize_messages(messages: list[dict]) -> list[dict]:
+    """Sanitize messages by replacing None content with empty string."""
+    sanitized = []
+    for msg in messages:
+        sanitized_msg = dict(msg)
+        if sanitized_msg.get("content") is None:
+            sanitized_msg["content"] = ""
+        sanitized.append(sanitized_msg)
+    return sanitized
+
+
 class ChatDatasetProcessor(BaseDatasetProcessor):
     def _encode_sample(self, sample: str) -> torch.Tensor:
+        messages = _sanitize_messages(sample[self.messages_field])
         chat_sample = self.tokenizer.apply_chat_template(
-            sample[self.messages_field],
+            messages,
             add_generation_prompt=False,
             tokenize=False,
         )
@@ -266,11 +278,14 @@ class ChatDatasetProcessor(BaseDatasetProcessor):
 
     def get_llmcompressor_dataset(self) -> Dataset:
         """Get the mapped dataset without tokenization applied."""
+        tokenizer = self.tokenizer
+        messages_field = self.messages_field
 
         def chat_template_fn(sample: dict[str, any]) -> dict[str, any]:
             """Apply chat template to the sample."""
-            chat_sample = self.tokenizer.apply_chat_template(
-                sample[self.messages_field],
+            messages = _sanitize_messages(sample[messages_field])
+            chat_sample = tokenizer.apply_chat_template(
+                messages,
                 add_generation_prompt=False,
                 tokenize=False,
             )

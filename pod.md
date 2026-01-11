@@ -123,21 +123,15 @@ cd /opt/reap
 source .venv/bin/activate
 
 python -u -m reap.prune \
-  --model_name moonshotai/Kimi-K2-Thinking \
-  --dataset_name theblackcat102/evol-codealpaca-v1 \
-  --samples_per_category 48 \
-  --model_max_length 8 \
-  --prune_method reap \
-  --compression_ratio 0.25 \
+  --model_name upstage/Solar-Open-100B \
+  --dataset_name combined \
+  --samples_per_category 20 \
+  --model_max_length 4 \
+  --prune_method under_average \
   --distance_measure cosine \
   --load_in_4bit true \
   --no_plot_clusters \
-  --do_eval false \
-  --run_lm_eval false \
-  --run_evalplus false \
-  --run_livecodebench false \
-  --run_math false \
-  --run_wildbench false
+  --do_eval false
 ```
 
 If this works, scale up your real run.

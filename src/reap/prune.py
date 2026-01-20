@@ -28,6 +28,7 @@ from reap.args import (
     ObserverArgs,
     DatasetArgs,
     ClusterArgs,
+    parse_compression_ratios,
 )
 from reap.data import DATASET_REGISTRY
 from reap.cluster import (
@@ -1040,76 +1041,99 @@ def main():
     total_experts = len(
         observer_data[next(iter(observer_data))]["expert_frequency"]
     )
-    
-    # under_average method doesn't use fixed n_experts_to_prune - it's determined per layer
+
+    compression_ratios = parse_compression_ratios(cluster_args.compression_ratio)
     if prune_args.prune_method == "under_average":
-        n_experts_to_prune = None  # Will be determined dynamically per layer
+        n_experts_to_prune_list = [None]
         logger.info(
             "Using under_average pruning: experts below average activation count will be pruned per layer"
         )
     else:
-        n_experts_to_prune = prune_args.n_experts_to_prune
-        if n_experts_to_prune is None:
-            if cluster_args.compression_ratio is None:
+        if prune_args.n_experts_to_prune is not None:
+            if compression_ratios and len(compression_ratios) > 1:
+                raise ValueError(
+                    "Multiple compression ratios cannot be used with n_experts_to_prune."
+                )
+            n_experts_to_prune_list = [prune_args.n_experts_to_prune]
+        else:
+            if compression_ratios is None:
                 raise ValueError(
                     "Either n_experts_to_prune or compression_ratio must be set for pruning."
                 )
-            else:
-                # Calculate n_experts_to_prune from compression_ratio
-                n_experts_to_prune = int(total_experts * cluster_args.compression_ratio)
+            if len(compression_ratios) > 1 and prune_args.prune_method != "reap":
+                raise ValueError(
+                    "Multiple compression ratios are only supported when prune_method is 'reap'."
+                )
+            n_experts_to_prune_list = [
+                int(total_experts * ratio) for ratio in compression_ratios
+            ]
+            for ratio, n_to_prune in zip(compression_ratios, n_experts_to_prune_list):
                 logger.info(
-                    f"Calculated n_experts to prune: {n_experts_to_prune} from compression_ratio: {cluster_args.compression_ratio}"
+                    f"Calculated n_experts to prune: {n_to_prune} from compression_ratio: {ratio}"
                 )
 
-    pruned_model_dir = get_pruned_model_dir(
-        results_dir, n_experts_to_prune, total_experts, prune_args, reap_args.seed, obs_args.renormalize_router_weights
-    )
-    if (
-        pruned_model_dir.exists()
-        and list(pruned_model_dir.glob("*.safetensors"))
-        and not prune_args.overwrite_pruned_model
-    ):
-        logger.info(
-            f"Pruned model directory {pruned_model_dir} already exists and contains pruned model files. "
-            "Skipping pruning step."
-        )
-    else:
-        # If 4-bit was used for observer, reload model in full precision for pruning
-        if obs_args.load_in_4bit:
-            logger.info("4-bit quantization was used for observer analysis.")
-            logger.info("Reloading model in full precision (bfloat16) for pruning...")
-            
-            # Clean up the 4-bit model
-            remove_hook_from_module(model, recurse=True)
-            model.to("cpu")
-            del model
-            torch.cuda.empty_cache()
-            gc.collect()
-            
-            # Reload in full precision
+    # Extract category-expert map from observer data if available
+    category_expert_map = None
+    if "__dominant_category_per_expert__" in observer_data:
+        category_expert_map = observer_data.pop("__dominant_category_per_expert__")
+        # Also remove the raw category frequency data as it's not needed for pruning
+        observer_data.pop("__category_expert_frequency__", None)
+
+    pruned_model_dirs = []
+    multi_ratio = len(n_experts_to_prune_list) > 1
+
+    def _load_model_for_pruning(force_reload: bool) -> Any:
+        nonlocal model
+        if force_reload or obs_args.load_in_4bit:
+            if model is not None:
+                remove_hook_from_module(model, recurse=True)
+                model.to("cpu")
+                del model
+                torch.cuda.empty_cache()
+                gc.collect()
             model = reload_model_in_full_precision(
                 model_name,
                 tokenizer,
                 local_only,
                 model_class_name,
             )
-        
-        logger.info(f"Pruning model to {total_experts - n_experts_to_prune} experts...")
-        
+        return model
+
+    for n_experts_to_prune in n_experts_to_prune_list:
+        pruned_model_dir = get_pruned_model_dir(
+            results_dir, n_experts_to_prune, total_experts, prune_args, reap_args.seed, obs_args.renormalize_router_weights
+        )
+        if (
+            pruned_model_dir.exists()
+            and list(pruned_model_dir.glob("*.safetensors"))
+            and not prune_args.overwrite_pruned_model
+        ):
+            logger.info(
+                f"Pruned model directory {pruned_model_dir} already exists and contains pruned model files. "
+                "Skipping pruning step."
+            )
+            pruned_model_dirs.append(pruned_model_dir)
+            continue
+
+        if obs_args.load_in_4bit:
+            logger.info("4-bit quantization was used for observer analysis.")
+        if obs_args.load_in_4bit or multi_ratio:
+            logger.info("Reloading model in full precision (bfloat16) for pruning...")
+
+        model = _load_model_for_pruning(force_reload=multi_ratio)
+
+        if prune_args.prune_method == "under_average":
+            logger.info("Pruning model with under_average per-layer thresholds...")
+        else:
+            logger.info(f"Pruning model to {total_experts - n_experts_to_prune} experts...")
+
         # --- FIX: Ensure model registration and observer config before pruning ---
         # This handles cases where reload_model_in_full_precision wasn't called
         # or if the model state needs refreshing
         model_class_name = model.__class__.__name__
         ensure_model_registered(model)
         ensure_observer_config(model)
-        
-        # Extract category-expert map from observer data if available
-        category_expert_map = None
-        if "__dominant_category_per_expert__" in observer_data:
-            category_expert_map = observer_data.pop("__dominant_category_per_expert__")
-            # Also remove the raw category frequency data as it's not needed for pruning
-            observer_data.pop("__category_expert_frequency__", None)
-        
+
         prune(
             observer_data,
             model,
@@ -1156,17 +1180,20 @@ def main():
             prune_args,
             cluster_args,
         )
+        pruned_model_dirs.append(pruned_model_dir)
 
     # eval
-    if reap_args.do_eval:
-        remove_hook_from_module(model, recurse=True)
-        model.to("cpu")
-        del model
+    if reap_args.do_eval and pruned_model_dirs:
+        if model is not None:
+            remove_hook_from_module(model, recurse=True)
+            model.to("cpu")
+            del model
         del observer_data
         torch.cuda.empty_cache()
         gc.collect()
-        model_args.model_name = pruned_model_dir
-        run_evaluate(model_args, pruned_model_dir / "eval", eval_args, reap_args.seed)
+        for pruned_model_dir in pruned_model_dirs:
+            model_args.model_name = pruned_model_dir
+            run_evaluate(model_args, pruned_model_dir / "eval", eval_args, reap_args.seed)
 
 
 if __name__ == "__main__":

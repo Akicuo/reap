@@ -1,8 +1,42 @@
 from dataclasses import dataclass, field
+from typing import Iterable
 import dotenv
 import os
 
 dotenv.load_dotenv()
+
+
+def _split_compression_ratio_values(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def parse_compression_ratios(value: str | float | Iterable[float] | None) -> list[float] | None:
+    """Parse compression ratio values from CLI or programmatic input."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return [float(value)]
+    if isinstance(value, str):
+        if not value.strip():
+            return None
+        values = _split_compression_ratio_values(value)
+        return [float(item) for item in values]
+    try:
+        return [float(item) for item in value]
+    except TypeError:
+        return [float(value)]
+
+
+def parse_single_compression_ratio(value: str | float | Iterable[float] | None) -> float | None:
+    """Parse a single compression ratio value; reject multi-value input."""
+    ratios = parse_compression_ratios(value)
+    if ratios is None:
+        return None
+    if len(ratios) > 1:
+        raise ValueError(
+            "Multiple compression ratios provided; this run expects a single value."
+        )
+    return ratios[0]
 
 
 @dataclass
@@ -183,12 +217,14 @@ class ClusterArgs:
             ],
         },
     )
-    compression_ratio: float | None = field(
+    compression_ratio: str | float | None = field(
         default=0.5,
         metadata={
             "help": (
                 "Compression ratio for clustering experts. If None, num_clusters must "
-                "be set."
+                "be set. For pruning with --prune_method reap, you can pass multiple "
+                "comma-separated values (e.g. '0.5,0.6,0.7') to generate multiple "
+                "pruned models."
             )
         },
     )

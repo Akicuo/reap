@@ -35,6 +35,7 @@ from reap.args import (
     KdArgs,
     EvalArgs,
     MergeArgs,
+    parse_single_compression_ratio,
 )
 from reap.merge import MergeMethod, MoEExpertMerger
 from reap.data import DATASET_REGISTRY
@@ -1470,8 +1471,9 @@ def main():
     # clustering
     logger.info("Start of clustering")
     num_clusters = cluster_args.num_clusters
+    compression_ratio = parse_single_compression_ratio(cluster_args.compression_ratio)
     if num_clusters is None:
-        if cluster_args.compression_ratio is None:
+        if compression_ratio is None:
             raise ValueError(
                 "Either num_clusters or compression_ratio must be set for clustering."
             )
@@ -1481,7 +1483,7 @@ def main():
                 total_experts = len(
                     observer_data[next(iter(observer_data))]["expert_frequency"]
                 )
-                num_clusters = int(total_experts * (1 - cluster_args.compression_ratio))
+                num_clusters = int(total_experts * (1 - compression_ratio))
             else:
                 # If skipping first or last layer, adjust total_experts accordingly
                 experts_per_layer = len(
@@ -1490,7 +1492,7 @@ def main():
                 layers = len(observer_data)
                 total_experts = layers * experts_per_layer
                 total_clusters = int(
-                    total_experts * (1 - cluster_args.compression_ratio)
+                    total_experts * (1 - compression_ratio)
                 )
                 total_layers = len(observer_data)
                 if merge_args.skip_first:
@@ -1499,7 +1501,7 @@ def main():
                     total_layers -= 1
                 num_clusters = int(total_clusters / total_layers)
             logger.info(
-                f"Calculated num_clusters: {num_clusters} from compression_ratio: {cluster_args.compression_ratio}"
+                f"Calculated num_clusters: {num_clusters} from compression_ratio: {compression_ratio}"
             )
     cluster_labels = cluster(
         observer_data,

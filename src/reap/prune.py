@@ -39,7 +39,6 @@ from reap.cluster import (
 from reap.model_util import get_moe, assert_merge, MODEL_ATTRS, patched_model_map, get_super_expert_indices, ensure_model_registered
 from reap.observer import ensure_observer_config, generate_pruning_report
 from reap.models.auto_patch import auto_patch_moe, patch_specific_model, needs_patching
-from reap.eval import run_evaluate
 import shutil
 
 logger = logging.getLogger(__name__)
@@ -1220,6 +1219,7 @@ def main():
 
     # eval
     if reap_args.do_eval and pruned_model_dirs:
+        from reap.eval import run_evaluate
         if model is not None:
             remove_hook_from_module(model, recurse=True)
             model.to("cpu")

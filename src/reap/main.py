@@ -53,7 +53,6 @@ from reap.cluster import (
 )
 from reap.model_util import get_moe, assert_merge, MODEL_ATTRS, patched_model_map, get_super_expert_indices, ensure_model_registered
 from reap.models.auto_patch import auto_patch_moe, patch_specific_model, needs_patching
-from reap.eval import run_evaluate
 from reap.cluster_plots import plot_cluster_analysis
 from reap.metrics import get_distance_fn
 
@@ -1658,6 +1657,7 @@ def main():
 
     # eval
     if reap_args.do_eval:
+        from reap.eval import run_evaluate
         remove_hook_from_module(model, recurse=True)
         model.to("cpu")
         del model

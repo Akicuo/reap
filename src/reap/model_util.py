@@ -186,6 +186,20 @@ MODEL_ATTRS = {
         "num_experts": "n_routed_experts",
         "num_experts_per_tok": "num_experts_per_tok",
     },
+    # GLM-4.7-Flash (zai-org/GLM-4.7-Flash) - glm4_moe_lite architecture
+    # Layer 0 is dense (Glm4MoeLiteMLP), layers 1-46 are MoE (Glm4MoeLiteMoE)
+    # Experts are fused in Glm4MoeLiteNaiveMoe with gate_up_proj tensor
+    "Glm4MoeLiteForCausalLM": {
+        "moe_block": "mlp",
+        "gate_proj": "gate_up_proj",
+        "up_proj": "gate_up_proj",
+        "down_proj": "down_proj",
+        "experts": "experts",
+        "fused": True,
+        "router": "gate",
+        "num_experts": "n_routed_experts",
+        "num_experts_per_tok": "num_experts_per_tok",
+    },
 
 }
 

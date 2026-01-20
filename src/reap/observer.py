@@ -903,6 +903,19 @@ class MiMoV2FlashObserverHookConfig(MoETransformerObserverConfig):
     fused_experts: bool = False
 
 
+@dataclass
+class Glm4MoeLiteObserverHookConfig(MoETransformerObserverConfig):
+    """Observer config for zai-org/GLM-4.7-Flash (glm4_moe_lite architecture).
+    
+    Layer 0 is dense (Glm4MoeLiteMLP), layers 1-46 are MoE (Glm4MoeLiteMoE).
+    Experts are fused in Glm4MoeLiteNaiveMoe with gate_up_proj tensor [64, 3072, 2048].
+    """
+    module_class_name_to_hook_regex: Optional[str] = "Glm4MoeLiteMoE"
+    num_experts_attr_name: str = "config.n_routed_experts"
+    top_k_attr_name: str = "config.num_experts_per_tok"
+    fused_experts: bool = True
+
+
 def _infer_moe_class_name(model) -> str | None:
     """Infer the MoE block class name by inspecting the model structure."""
     moe_patterns = ["MoE", "SparseMoeBlock", "MoeBlock", "MoeMLP", "ExpertLayer"]
@@ -1173,4 +1186,7 @@ OBSERVER_CONFIG_REGISTRY = {
     "KimiK2ForCausalLM": DeepSeekMoEObserverHookConfig,
     # XiaomiMiMo/MiMo-V2-Flash - 309B MoE model
     "MiMoV2FlashForCausalLM": MiMoV2FlashObserverHookConfig,
+    # GLM-4.7-Flash (zai-org/GLM-4.7-Flash) - glm4_moe_lite architecture
+    # Layer 0 is dense, layers 1-46 are MoE with fused experts
+    "Glm4MoeLiteForCausalLM": Glm4MoeLiteObserverHookConfig,
 }

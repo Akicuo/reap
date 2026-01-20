@@ -217,15 +217,16 @@ class ClusterArgs:
             ],
         },
     )
-    compression_ratio: str | float | None = field(
-        default=0.5,
+    compression_ratio: str | None = field(
+        default="0.5",
         metadata={
             "help": (
                 "Compression ratio for clustering experts. If None, num_clusters must "
                 "be set. For pruning with --prune_method reap, you can pass multiple "
                 "comma-separated values (e.g. '0.5,0.6,0.7') to generate multiple "
                 "pruned models."
-            )
+            ),
+            "type": str,
         },
     )
     num_clusters: int | None = field(

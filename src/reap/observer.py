@@ -612,21 +612,58 @@ class MoETransformerObserver(BaseTransformerObserver):
             activations = torch.zeros((num_experts, *flat_input.shape), device=device)
 
             if self.hook_config.fused_experts:
-                # Fused experts path
-                router_indices = (
-                    torch.arange(batch_size * sequence_length, device=device)
-                    .view(1, -1)
-                    .expand(num_experts, -1)
+                # Check if this is a grouped_mm style fused expert (like Glm4MoeLiteNaiveMoe)
+                # These require routing indices and can't be called directly
+                experts_module = module.experts
+                is_grouped_mm = (
+                    hasattr(experts_module, 'gate_up_proj') and 
+                    hasattr(experts_module, 'down_proj') and
+                    isinstance(experts_module.gate_up_proj, torch.Tensor)
                 )
-                router_indices = router_indices.reshape(-1, 1).expand(-1, hidden_dim)
-                routed_in = torch.gather(
-                    input=flat_input,
-                    dim=0,
-                    index=router_indices,
-                ).to(device)
-                # record unweighted activations for all experts
-                routed_out = module.experts(routed_in)
-                activations = routed_out.view(num_experts, *flat_input.shape)
+                
+                if is_grouped_mm:
+                    # Grouped_mm fused experts - compute activations manually per expert
+                    # gate_up_proj shape: [num_experts, 2*intermediate, hidden_dim]
+                    # down_proj shape: [num_experts, hidden_dim, intermediate]
+                    gate_up_proj = experts_module.gate_up_proj  # [E, 2*I, H]
+                    down_proj = experts_module.down_proj  # [E, H, I]
+                    
+                    intermediate_size = down_proj.shape[2]
+                    
+                    for expert_idx in range(num_experts):
+                        # Get this expert's weights
+                        expert_gate_up = gate_up_proj[expert_idx]  # [2*I, H]
+                        expert_down = down_proj[expert_idx]  # [H, I]
+                        
+                        # Compute forward: gate_up = input @ gate_up.T
+                        gate_up_out = F.linear(flat_input.to(expert_gate_up.dtype), expert_gate_up)  # [tokens, 2*I]
+                        
+                        # Split into gate and up
+                        gate_out, up_out = gate_up_out.chunk(2, dim=-1)  # each [tokens, I]
+                        
+                        # SiLU activation on gate, multiply with up
+                        hidden = F.silu(gate_out) * up_out  # [tokens, I]
+                        
+                        # Down projection
+                        output = F.linear(hidden, expert_down)  # [tokens, H]
+                        
+                        activations[expert_idx] = output.to(device)
+                else:
+                    # Standard fused experts path (like Llama4)
+                    router_indices = (
+                        torch.arange(batch_size * sequence_length, device=device)
+                        .view(1, -1)
+                        .expand(num_experts, -1)
+                    )
+                    router_indices = router_indices.reshape(-1, 1).expand(-1, hidden_dim)
+                    routed_in = torch.gather(
+                        input=flat_input,
+                        dim=0,
+                        index=router_indices,
+                    ).to(device)
+                    # record unweighted activations for all experts
+                    routed_out = module.experts(routed_in)
+                    activations = routed_out.view(num_experts, *flat_input.shape)
 
             else:  # loop based MoE execution
                 for idx, expert in enumerate(module.experts):

@@ -370,16 +370,24 @@ def prune(
                 )
             setattr(moe, model_attrs["router"], router)
         else:
-            # prune fused experts, only tested for llama-4
+            # prune fused experts (Llama4, Glm4MoeLite, etc.)
             moe.experts.gate_up_proj.data = moe.experts.gate_up_proj[
                 retained_expert_indicies
             ]
             moe.experts.down_proj.data = moe.experts.down_proj[retained_expert_indicies]
-            moe.num_experts = len(retained_expert_indicies)
-            moe.router.weight.data = moe.router.weight.data[retained_expert_indicies]
-            moe.router.out_features = len(retained_expert_indicies)
-            if hasattr(moe.router, "num_experts"):  # transformers >= 4.54+
-                moe.router.num_experts = len(retained_expert_indicies)
+            if hasattr(moe, 'num_experts'):
+                moe.num_experts = len(retained_expert_indicies)
+            
+            # Use model_attrs to get the correct router attribute name
+            router_attr = model_attrs.get("router", "router")
+            router = getattr(moe, router_attr)
+            router.weight.data = router.weight.data[retained_expert_indicies]
+            router.out_features = len(retained_expert_indicies)
+            if hasattr(router, "num_experts"):  # transformers >= 4.54+
+                router.num_experts = len(retained_expert_indicies)
+            # Handle e_score_correction_bias if present (some models like GLM)
+            if hasattr(router, "e_score_correction_bias"):
+                router.e_score_correction_bias.data = router.e_score_correction_bias.data[retained_expert_indicies]
 
     # patch config and dump
     logger.info("Saving pruned model...")

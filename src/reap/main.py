@@ -1256,6 +1256,32 @@ def main():
             model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
         else:
             raise
+    except ValueError as model_type_error:
+        logger.warning(f"Model type not recognized: {model_type_error}")
+        logger.info("Retrying with explicit config loading...")
+        try:
+            from transformers import AutoConfig
+            config = AutoConfig.from_pretrained(
+                model_name,
+                trust_remote_code=True,
+                local_files_only=local_only,
+            )
+        except Exception as config_error:
+            logger.warning(f"AutoConfig failed for model type: {config_error}")
+            from transformers import PretrainedConfig
+            config = PretrainedConfig.from_pretrained(
+                model_name,
+                trust_remote_code=True,
+                local_files_only=local_only,
+            )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            config=config,
+            device_map="auto",
+            trust_remote_code=True,
+            local_files_only=local_only,
+            quantization_config=quantization_config,
+        )
     except AttributeError as attr_error:
         # Handle bug in transformers where quantization_config.to_dict() is called on None
         if "NoneType" in str(attr_error) and "to_dict" in str(attr_error):

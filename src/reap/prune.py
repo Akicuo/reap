@@ -534,18 +534,23 @@ def reload_model_in_full_precision(
                         model_type = config_dict.get("model_type", "deepseek_v3")
                         logger.info(f"Detected model type from config.json: {model_type}")
                         
-                        if model_type == "glm4_moe":
-                            # Use transformers built-in Glm4MoeConfig if available
+                        if model_type in ("glm4_moe", "glm4_moe_lite"):
+                            # Use transformers built-in GLM4 config if available
                             try:
-                                from transformers import Glm4MoeConfig
-                                logger.info("Using built-in Glm4MoeConfig")
-                                config = Glm4MoeConfig.from_pretrained(model_name, trust_remote_code=True)
+                                if model_type == "glm4_moe_lite":
+                                    from transformers import Glm4MoeLiteConfig
+                                    logger.info("Using built-in Glm4MoeLiteConfig")
+                                    config = Glm4MoeLiteConfig.from_pretrained(model_name, trust_remote_code=True)
+                                else:
+                                    from transformers import Glm4MoeConfig
+                                    logger.info("Using built-in Glm4MoeConfig")
+                                    config = Glm4MoeConfig.from_pretrained(model_name, trust_remote_code=True)
                             except ImportError:
-                                logger.warning("Glm4MoeConfig not found in transformers, trying fallback")
+                                logger.warning("GLM4 config not found in transformers, trying fallback")
                                 # Fallback to generic config but with correct model_type
                                 from transformers import PretrainedConfig
                                 config = PretrainedConfig(
-                                    model_type="glm4_moe",
+                                    model_type=model_type,
                                     trust_remote_code=True
                                 )
                         else:
@@ -882,12 +887,17 @@ def main():
                         model_type = config_dict.get("model_type", "deepseek_v3")
                         logger.info(f"Detected model type from config.json: {model_type}")
                         
-                        if model_type == "glm4_moe":
-                            # Use transformers built-in Glm4MoeConfig if available
+                        if model_type in ("glm4_moe", "glm4_moe_lite"):
+                            # Use transformers built-in GLM4 config if available
                             try:
-                                from transformers import Glm4MoeConfig
-                                logger.info("Using built-in Glm4MoeConfig")
-                                config = Glm4MoeConfig.from_pretrained(model_name, trust_remote_code=True)
+                                if model_type == "glm4_moe_lite":
+                                    from transformers import Glm4MoeLiteConfig
+                                    logger.info("Using built-in Glm4MoeLiteConfig")
+                                    config = Glm4MoeLiteConfig.from_pretrained(model_name, trust_remote_code=True)
+                                else:
+                                    from transformers import Glm4MoeConfig
+                                    logger.info("Using built-in Glm4MoeConfig")
+                                    config = Glm4MoeConfig.from_pretrained(model_name, trust_remote_code=True)
                                 
                                 # Instantiating model directly to bypass AutoModel's remote code check
                                 from transformers import Glm4MoeForCausalLM
@@ -903,11 +913,11 @@ def main():
                                 # Skip the AutoModelForCausalLM call below
                                 return model 
                             except ImportError:
-                                logger.warning("Glm4MoeConfig/Glm4MoeForCausalLM not found in transformers, trying fallback")
+                                logger.warning("GLM4 config/Glm4MoeForCausalLM not found in transformers, trying fallback")
                                 # Fallback to generic config but with correct model_type
                                 from transformers import PretrainedConfig
                                 config = PretrainedConfig(
-                                    model_type="glm4_moe",
+                                    model_type=model_type,
                                     trust_remote_code=True
                                 )
                         else:

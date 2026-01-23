@@ -402,7 +402,22 @@ def prune(
 
     pruned_model_dir.mkdir(parents=True, exist_ok=True)
     start = time.time()
-    model.save_pretrained(pruned_model_dir)
+    try:
+        model.save_pretrained(pruned_model_dir)
+    except RuntimeError as e:
+        if "CUDA" in str(e):
+            logger.warning(f"CUDA error during save_pretrained: {e}")
+            logger.info("Falling back to manual save with safetensors...")
+            # Fallback: save manually without triggering deepspeed import
+            from safetensors.torch import save_file
+            state_dict = model.state_dict()
+            # Move all tensors to CPU for saving
+            state_dict = {k: v.cpu() for k, v in state_dict.items()}
+            save_file(state_dict, pruned_model_dir / "model.safetensors")
+            model.config.save_pretrained(pruned_model_dir)
+            logger.info("Model saved using fallback method (safetensors)")
+        else:
+            raise
     end = time.time()
     logger.info(
         f"Pruned model saved to {pruned_model_dir} in {end - start:.2f} seconds"

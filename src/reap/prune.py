@@ -12,12 +12,15 @@ import os
 
 import torch
 from tqdm import tqdm
+
+# IMPORTANT: Import compat patches BEFORE transformers to patch rope_config_validation
+# Models like LongCat do top-level imports that need this patch
+from reap.transformers_compat import apply_transformers_compat_patches
+
 from transformers import AutoTokenizer, AutoModelForCausalLM, HfArgumentParser, BitsAndBytesConfig
 
 from accelerate.utils import set_seed
 from accelerate.hooks import remove_hook_from_module
-
-from reap.transformers_compat import apply_transformers_compat_patches
 
 from reap.main import record_activations, smoke_test, create_results_directory
 from reap.args import (

@@ -587,6 +587,17 @@ class MoETransformerObserver(BaseTransformerObserver):
                     )
                 except Exception:
                     pass
+            # Fallback 4b: Handle LongCat-style router (router.classifier.weight pattern)
+            elif hasattr(module, 'router') and hasattr(module.router, 'classifier'):
+                try:
+                    # LongcatTopkRouter uses router.classifier as the gate Linear layer
+                    classifier_weight = module.router.classifier.weight
+                    router_logits = F.linear(
+                        flat_input.to(classifier_weight.dtype),
+                        classifier_weight
+                    )
+                except Exception:
+                    pass
             
             # Fallback 5: Create placeholder router_logits if all else fails
             if router_logits is None:
@@ -602,6 +613,16 @@ class MoETransformerObserver(BaseTransformerObserver):
             # Ensure router_logits is on the right device and has right shape
             if router_logits.device != device:
                 router_logits = router_logits.to(device)
+            
+            # Handle models with zero/identity experts (like LongCat)
+            # If router_logits has more columns than num_experts (e.g., 768 vs 512),
+            # truncate to only track the real experts we can prune
+            if router_logits.shape[-1] > num_experts:
+                logger.debug(
+                    f"Truncating router_logits from {router_logits.shape[-1]} to {num_experts} experts "
+                    "(model may have zero/identity experts that can't be pruned)"
+                )
+                router_logits = router_logits[:, :num_experts]
             
             # Get selected experts from router_logits
             _, selected_experts = torch.topk(router_logits, top_k, dim=-1)
@@ -953,6 +974,33 @@ class Glm4MoeLiteObserverHookConfig(MoETransformerObserverConfig):
     fused_experts: bool = True
 
 
+@dataclass
+class LongcatMoEObserverHookConfig(MoETransformerObserverConfig):
+    """Observer config for meituan-longcat/LongCat-Flash-Thinking-2601 (560B MoE model).
+    
+    MoE architecture:
+    - LongcatMoE is the MoE block, located at decoder_layer.mlp
+    - LongcatTopkRouter is the router (router.classifier is the Linear gate)
+    - 512 real experts (LongcatMLP) + 256 identity "zero experts" = 768 total from router's view
+    - top_k = 12 (moe_topk in config)
+    - Uses MLA attention (Multi-head Latent Attention) similar to DeepSeek
+    - zero_expert_type can be "identity" (pass-through) or "drop" (zero output)
+    
+    The router computes logits via router.classifier (Linear layer), not directly from router.weight.
+    
+    NOTE: num_experts_attr_name uses "config.n_routed_experts" (512) for real prunable experts.
+    The router has 768 logits (including zero experts), but these are truncated in the observer
+    to only track the 512 real experts that have actual MLP weights and can be pruned.
+    Zero experts (indices 512-767) are virtual (identity/drop) with no weights.
+    """
+    module_class_name_to_hook_regex: Optional[str] = "LongcatMoE"
+    # Use config.n_routed_experts (512) for real experts that can be pruned
+    # Router logits will be truncated from 768 to 512 in the observer hook
+    num_experts_attr_name: str = "config.n_routed_experts"
+    top_k_attr_name: str = "router.top_k"  # LongcatTopkRouter has self.top_k = config.moe_topk
+    fused_experts: bool = False
+
+
 def _infer_moe_class_name(model) -> str | None:
     """Infer the MoE block class name by inspecting the model structure."""
     moe_patterns = ["MoE", "SparseMoeBlock", "MoeBlock", "MoeMLP", "ExpertLayer"]
@@ -1226,4 +1274,8 @@ OBSERVER_CONFIG_REGISTRY = {
     # GLM-4.7-Flash (zai-org/GLM-4.7-Flash) - glm4_moe_lite architecture
     # Layer 0 is dense, layers 1-46 are MoE with fused experts
     "Glm4MoeLiteForCausalLM": Glm4MoeLiteObserverHookConfig,
+    # meituan-longcat/LongCat-Flash-Thinking-2601 - 560B MoE model
+    # 512 real experts + 256 identity zero experts, top_k=12, MLA attention
+    "LongcatCausalLM": LongcatMoEObserverHookConfig,
+    "LongcatForCausalLM": LongcatMoEObserverHookConfig,
 }

@@ -36,7 +36,7 @@ MOE_BLOCK_PATTERNS = [
 ROUTER_ATTR_NAMES = ["gate", "router", "gating", "expert_gate", "moe_gate"]
 
 # Common router weight attribute names
-ROUTER_WEIGHT_ATTRS = ["weight", "linear", "proj"]
+ROUTER_WEIGHT_ATTRS = ["weight", "linear", "proj", "classifier"]
 
 
 def _is_moe_block(module: nn.Module) -> bool:
@@ -214,6 +214,8 @@ def patch_specific_model(model: nn.Module, model_class_name: str) -> int:
     # Model-specific patchers
     specific_patchers = {
         "SolarOpenForCausalLM": _patch_solar_open,
+        "LongcatCausalLM": _patch_longcat,
+        "LongcatForCausalLM": _patch_longcat,
         # Add more specific patchers here as needed
     }
     
@@ -283,6 +285,63 @@ def _patch_solar_open(model: nn.Module) -> int:
     return patched_count
 
 
+def _patch_longcat(model: nn.Module) -> int:
+    """
+    Specific patcher for meituan-longcat/LongCat-Flash-Thinking-2601.
+    
+    LongCat MoE architecture:
+    - LongcatMoE is the MoE block at decoder_layer.mlp
+    - LongcatTopkRouter is the router with router.classifier as the gate Linear
+    - 512 real experts + 256 identity "zero experts" 
+    - The router's classifier weight is used to compute router_logits
+    """
+    patched_count = 0
+    
+    for layer in model.model.layers:
+        if hasattr(layer, 'mlp') and layer.mlp.__class__.__name__ == 'LongcatMoE':
+            moe = layer.mlp
+            
+            if hasattr(moe, '_reap_patched'):
+                continue
+            
+            # Get config values from the model config
+            hidden_size = moe.config.hidden_size
+            
+            def make_patched_forward(m, h_size):
+                original_forward = m.forward.__func__ if hasattr(m.forward, '__func__') else m.forward
+                
+                def patched_forward(self, hidden_states):
+                    # Compute router logits using router.classifier
+                    # LongcatTopkRouter computes: F.linear(hidden_states, classifier.weight)
+                    hidden_flat = hidden_states.view(-1, h_size)
+                    
+                    # Get router logits from the router's classifier
+                    router_logits = F.linear(
+                        hidden_flat.type(torch.float32),
+                        self.router.classifier.weight.type(torch.float32)
+                    )
+                    
+                    # Add e_score_correction_bias if present (used for routing selection)
+                    # Note: This matches what the actual router does in get_topk_indices
+                    
+                    # Store for observer hook to retrieve
+                    self._last_router_logits = router_logits
+                    
+                    # Call original forward
+                    return original_forward(self, hidden_states)
+                
+                return patched_forward
+            
+            moe.forward = types.MethodType(make_patched_forward(moe, hidden_size), moe)
+            moe._reap_patched = True
+            patched_count += 1
+    
+    if patched_count > 0:
+        logger.info(f"[patch_longcat] Patched {patched_count} LongcatMoE layers")
+    
+    return patched_count
+
+
 def needs_patching(model: nn.Module) -> bool:
     """
     Check if a model likely needs MoE patching.
@@ -305,9 +364,19 @@ def needs_patching(model: nn.Module) -> bool:
         "SolarOpenForCausalLM",
     ]
     
+    # These model types NEED patching (MoE forward only returns hidden_states)
+    patch_required = [
+        "LongcatCausalLM",
+        "LongcatForCausalLM",
+    ]
+    
     if model_class_name in no_patch_needed:
         logger.debug(f"Model {model_class_name} is known to not need patching")
         return False
+    
+    if model_class_name in patch_required:
+        logger.debug(f"Model {model_class_name} is known to require patching")
+        return True
     
     for name, module in model.named_modules():
         if _is_moe_block(module):

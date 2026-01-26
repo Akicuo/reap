@@ -200,6 +200,35 @@ MODEL_ATTRS = {
         "num_experts": "n_routed_experts",
         "num_experts_per_tok": "num_experts_per_tok",
     },
+    # meituan-longcat/LongCat-Flash-Thinking-2601 - 560B MoE model
+    # MoE uses LongcatMoE with LongcatTopkRouter (router.classifier is the gate)
+    # 512 real experts + 256 identity "zero experts" (total 768 from router's perspective)
+    # top_k = 12, uses MLA attention similar to DeepSeek
+    "LongcatCausalLM": {
+        "moe_block": "mlp",
+        "gate_proj": "gate_proj",
+        "up_proj": "up_proj",
+        "down_proj": "down_proj",
+        "experts": "experts",
+        "fused": False,
+        "router": "router",  # LongcatTopkRouter module
+        "router_weight_attr": "classifier.weight",  # router.classifier is the gate Linear
+        "num_experts": "n_routed_experts",
+        "num_experts_per_tok": "moe_topk",
+    },
+    # Alternative name for LongCat model
+    "LongcatForCausalLM": {
+        "moe_block": "mlp",
+        "gate_proj": "gate_proj",
+        "up_proj": "up_proj",
+        "down_proj": "down_proj",
+        "experts": "experts",
+        "fused": False,
+        "router": "router",
+        "router_weight_attr": "classifier.weight",
+        "num_experts": "n_routed_experts",
+        "num_experts_per_tok": "moe_topk",
+    },
 
 }
 
@@ -263,6 +292,10 @@ def _infer_model_attrs_from_model(model) -> dict:
                         for router_name in ["gate", "router", "gating"]:
                             if hasattr(moe, router_name):
                                 attrs["router"] = router_name
+                                # Check if router uses classifier pattern (like LongCat)
+                                router_module = getattr(moe, router_name)
+                                if hasattr(router_module, 'classifier') and isinstance(router_module.classifier, torch.nn.Linear):
+                                    attrs["router_weight_attr"] = "classifier.weight"
                                 break
                         
                         break

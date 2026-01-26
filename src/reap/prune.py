@@ -360,10 +360,40 @@ def prune(
 
             # prune router
             router = getattr(moe, model_attrs["router"])
-            router.weight.data = router.weight.data[retained_expert_indicies, :]
-            if getattr(router, "bias", None):
-                router.bias.data = router.bias.data[retained_expert_indicies]
-            router.out_features = len(retained_expert_indicies)
+            
+            # Handle different router structures:
+            # - Standard: router.weight (direct Linear layer)
+            # - LongCat-style: router.classifier.weight (router is a module with classifier attr)
+            router_weight_attr = model_attrs.get("router_weight_attr", None)
+            if router_weight_attr and "." in router_weight_attr:
+                # Handle nested attribute like "classifier.weight"
+                parts = router_weight_attr.split(".")
+                inner_module = router
+                for part in parts[:-1]:
+                    inner_module = getattr(inner_module, part)
+                weight_attr = parts[-1]
+                # Update weight
+                setattr(inner_module, weight_attr, 
+                        getattr(inner_module, weight_attr)[retained_expert_indicies, :])
+                # Update bias if present
+                bias_attr = weight_attr.replace("weight", "bias")
+                if hasattr(inner_module, bias_attr) and getattr(inner_module, bias_attr) is not None:
+                    setattr(inner_module, bias_attr,
+                            getattr(inner_module, bias_attr)[retained_expert_indicies])
+                # Update out_features
+                if hasattr(inner_module, "out_features"):
+                    inner_module.out_features = len(retained_expert_indicies)
+                # Also update n_routed_experts on router if present (LongCat has this)
+                if hasattr(router, "n_routed_experts"):
+                    router.n_routed_experts = len(retained_expert_indicies)
+            else:
+                # Standard router with direct weight attribute
+                router.weight.data = router.weight.data[retained_expert_indicies, :]
+                if getattr(router, "bias", None):
+                    router.bias.data = router.bias.data[retained_expert_indicies]
+                router.out_features = len(retained_expert_indicies)
+            
+            # Handle e_score_correction_bias (present in some models like LongCat, Ernie)
             if hasattr(router, "e_score_correction_bias"):
                 router.e_score_correction_bias.data = (
                     router.e_score_correction_bias.data[retained_expert_indicies]

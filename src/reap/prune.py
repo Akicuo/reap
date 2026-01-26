@@ -726,8 +726,16 @@ def main():
     
     # --- FIX 1: Handle tokenizer loading for models with custom configs ---
     # Some models (like MiniMax-M2.1-PRISM, LongCat) use custom config classes that aren't in tokenizer mapping
+    # LongCat specifically has tokenizer_class: "PreTrainedTokenizer" which is a base class
+    # and can't be auto-loaded - need to use PreTrainedTokenizerFast for tokenizer.json
     try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        # Check if this is a model with base class tokenizer_class that needs special handling
+        if "longcat" in model_name.lower():
+            logger.info("LongCat model detected - using PreTrainedTokenizerFast to load tokenizer.json")
+            from transformers import PreTrainedTokenizerFast
+            tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name, trust_remote_code=True)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     except (KeyError, ValueError) as e:
         logger.warning(f"Standard tokenizer loading failed: {e}")
         logger.info("Attempting fallback tokenizer loading with trust_remote_code and custom handling...")

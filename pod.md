@@ -145,12 +145,12 @@ cd /opt/reap
 source .venv/bin/activate
 
 python -u -m reap.prune \
-  --model_name upstage/Solar-Open-100B \
-  --dataset_name theblackcat102/evol-codealpaca-v1 \
-  --samples_per_category 48 \
+  --model_name meituan-longcat/LongCat-Flash-Thinking-2601 \
+  --dataset_name combined \
+  --samples_per_category 20 \
   --model_max_length 8 \
   --prune_method reap \
-  --compression_ratio 0.35 \
+  --compression_ratio 0.5 \
   --distance_measure cosine \
   --load_in_4bit true \
   --no_plot_clusters \

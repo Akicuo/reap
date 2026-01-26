@@ -725,10 +725,10 @@ def main():
     apply_transformers_compat_patches()
     
     # --- FIX 1: Handle tokenizer loading for models with custom configs ---
-    # Some models (like MiniMax-M2.1-PRISM) use custom config classes that aren't in tokenizer mapping
+    # Some models (like MiniMax-M2.1-PRISM, LongCat) use custom config classes that aren't in tokenizer mapping
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    except KeyError as e:
+    except (KeyError, ValueError) as e:
         logger.warning(f"Standard tokenizer loading failed: {e}")
         logger.info("Attempting fallback tokenizer loading with trust_remote_code and custom handling...")
         # Try with additional trust_remote_code and fallback options
@@ -747,6 +747,25 @@ def main():
                     trust_remote_code=True,
                     use_fast=False,
                 )
+            # Special handling for LongCat models
+            elif config.__class__.__name__ == "LongcatConfig" or "longcat" in model_name.lower():
+                logger.info("LongCat model detected - using PreTrainedTokenizerFast fallback")
+                # LongCat has tokenizer.json but no explicit tokenizer class
+                # Try loading with PreTrainedTokenizerFast directly
+                try:
+                    from transformers import PreTrainedTokenizerFast
+                    tokenizer = PreTrainedTokenizerFast.from_pretrained(
+                        model_name,
+                        trust_remote_code=True,
+                    )
+                except Exception as longcat_tok_err:
+                    logger.warning(f"PreTrainedTokenizerFast failed: {longcat_tok_err}")
+                    # Try with LlamaTokenizerFast as LongCat may use similar tokenizer
+                    from transformers import LlamaTokenizerFast
+                    tokenizer = LlamaTokenizerFast.from_pretrained(
+                        model_name,
+                        trust_remote_code=True,
+                    )
             else:
                 # Try loading tokenizer with explicit trust_remote_code
                 tokenizer = AutoTokenizer.from_pretrained(
@@ -759,12 +778,11 @@ def main():
             logger.error(f"Fallback tokenizer loading also failed: {tokenizer_error}")
             # Final fallback: try to load with just the path
             try:
-                logger.info("Attempting final fallback with direct file loading")
-                tokenizer = AutoTokenizer.from_pretrained(
+                logger.info("Attempting final fallback with PreTrainedTokenizerFast")
+                from transformers import PreTrainedTokenizerFast
+                tokenizer = PreTrainedTokenizerFast.from_pretrained(
                     model_name,
                     trust_remote_code=True,
-                    use_fast=False,
-                    # Skip slow-fast tokenizer conflicts by forcing slow tokenizer
                 )
             except Exception:
                 # Last resort: Create a basic tokenizer 

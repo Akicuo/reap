@@ -162,18 +162,6 @@ MODEL_ATTRS = {
         "num_experts": "n_routed_experts",
         "num_experts_per_tok": "num_experts_per_tok",
     },
-    # MiniMax-M2.1-PRISM - likely similar to DeepSeek architecture
-    "MiniMaxForCausalLM": {
-        "moe_block": "mlp",
-        "gate_proj": "gate_proj",
-        "up_proj": "up_proj",
-        "down_proj": "down_proj",
-        "experts": "experts",
-        "fused": False,
-        "router": "gate",
-        "num_experts": "n_routed_experts",
-        "num_experts_per_tok": "num_experts_per_tok",
-    },
     # Kimi-K2-Thinking - DeepSeek V3 based architecture
     "KimiK2ForCausalLM": {
         "moe_block": "mlp",
@@ -442,11 +430,6 @@ def patched_model_map(model: str):
     if model == "PrimeIntellect/INTELLECT-3":
         patched = False  # No local patch needed, handled by config detection fix
         logger.info(f"PrimeIntellect/INTELLECT-3 detected - will use auto-detection and config handling")
-
-    # Ex0bit/MiniMax-M2.1-PRISM - custom BitConfig tokenizer issues
-    if model == "Ex0bit/MiniMax-M2.1-PRISM":
-        patched = False  # No local patch needed, handled by tokenizer fallback
-        logger.info(f"Ex0bit/MiniMax-M2.1-PRISM detected - will use tokenizer fallback handling")
 
     # moonshotai/Kimi-K2-Thinking - pre-quantized with CompressedTensorsConfig
     if model == "moonshotai/Kimi-K2-Thinking":

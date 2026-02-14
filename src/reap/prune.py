@@ -728,7 +728,7 @@ def main():
     apply_transformers_compat_patches()
     
     # --- FIX 1: Handle tokenizer loading for models with custom configs ---
-    # Some models (like MiniMax-M2.1-PRISM, LongCat) use custom config classes that aren't in tokenizer mapping
+    # Some models (like LongCat) use custom config classes that aren't in tokenizer mapping
     # LongCat specifically has tokenizer_class: "PreTrainedTokenizer" which is a base class
     # and can't be auto-loaded - need to use PreTrainedTokenizerFast for tokenizer.json
     try:
@@ -749,7 +749,7 @@ def main():
             config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
             logger.info(f"Model config type: {config.__class__.__name__}")
             
-            # Special handling for BitConfig (MiniMax-M2.1-PRISM)
+            # Special handling for BitConfig
             if config.__class__.__name__ == "BitConfig":
                 logger.info("BitConfig detected - using generic tokenizer fallback")
                 # Try loading with slow tokenizer only (not fast)

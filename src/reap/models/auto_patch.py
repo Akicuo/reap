@@ -226,7 +226,6 @@ def patch_specific_model(model: nn.Module, model_class_name: str) -> int:
     # These are DeepSeek-like architectures
     new_supported_models = [
         "DeepseekV3ForCausalLM",
-        "MiniMaxForCausalLM", 
         "KimiK2ForCausalLM",
     ]
     

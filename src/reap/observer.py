@@ -1265,8 +1265,6 @@ OBSERVER_CONFIG_REGISTRY = {
     "VaetkiForCausalLM": VaetkiForCausalLMObserverHookConfig,
     # PrimeIntellect/INTELLECT-3 - DeepSeek V3 based
     "DeepseekV3ForCausalLM": DeepSeekMoEObserverHookConfig,
-    # MiniMax-M2.1-PRISM - similar to DeepSeek
-    "MiniMaxForCausalLM": DeepSeekMoEObserverHookConfig,
     # Kimi-K2-Thinking - DeepSeek V3 based
     "KimiK2ForCausalLM": DeepSeekMoEObserverHookConfig,
     # XiaomiMiMo/MiMo-V2-Flash - 309B MoE model

@@ -1001,6 +1001,22 @@ class LongcatMoEObserverHookConfig(MoETransformerObserverConfig):
     fused_experts: bool = False
 
 
+@dataclass
+class MiniMaxM2ObserverHookConfig(MoETransformerObserverConfig):
+    """Observer config for MiniMaxAI/MiniMax-M2.5.
+
+    MoE architecture:
+    - MiniMaxM2SparseMoeBlock is the MoE block
+    - Uses w1/w2/w3 projections (not gate_proj/up_proj/down_proj)
+    - 256 experts, top_k=8
+    - Router is 'gate' (Linear layer)
+    """
+    module_class_name_to_hook_regex: Optional[str] = "MiniMaxM2SparseMoeBlock"
+    num_experts_attr_name: str = "config.num_local_experts"
+    top_k_attr_name: str = "config.num_experts_per_tok"
+    fused_experts: bool = False
+
+
 def _infer_moe_class_name(model) -> str | None:
     """Infer the MoE block class name by inspecting the model structure."""
     moe_patterns = ["MoE", "SparseMoeBlock", "MoeBlock", "MoeMLP", "ExpertLayer"]
@@ -1276,4 +1292,6 @@ OBSERVER_CONFIG_REGISTRY = {
     # 512 real experts + 256 identity zero experts, top_k=12, MLA attention
     "LongcatCausalLM": LongcatMoEObserverHookConfig,
     "LongcatForCausalLM": LongcatMoEObserverHookConfig,
+    # MiniMaxAI/MiniMax-M2.5 - Uses w1/w2/w3 projections
+    "MiniMaxM2ForCausalLM": MiniMaxM2ObserverHookConfig,
 }

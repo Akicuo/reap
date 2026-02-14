@@ -217,6 +217,18 @@ MODEL_ATTRS = {
         "num_experts": "n_routed_experts",
         "num_experts_per_tok": "moe_topk",
     },
+    # MiniMaxAI/MiniMax-M2.5 - Uses w1/w2/w3 projections (not gate/up/down)
+    "MiniMaxM2ForCausalLM": {
+        "moe_block": "mlp",
+        "gate_proj": "w1",
+        "up_proj": "w3",
+        "down_proj": "w2",
+        "experts": "experts",
+        "fused": False,
+        "router": "gate",
+        "num_experts": "num_local_experts",
+        "num_experts_per_tok": "num_experts_per_tok",
+    },
 
 }
 

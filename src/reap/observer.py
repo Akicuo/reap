@@ -1010,10 +1010,11 @@ class MiniMaxM2ObserverHookConfig(MoETransformerObserverConfig):
     - Uses w1/w2/w3 projections (not gate_proj/up_proj/down_proj)
     - 256 experts, top_k=8
     - Router is 'gate' (Linear layer)
+    - Note: MoE block stores config values directly as attributes (top_k, experts.num_experts)
     """
     module_class_name_to_hook_regex: Optional[str] = "MiniMaxM2SparseMoeBlock"
-    num_experts_attr_name: str = "config.num_local_experts"
-    top_k_attr_name: str = "config.num_experts_per_tok"
+    num_experts_attr_name: str = "experts.num_experts"
+    top_k_attr_name: str = "top_k"
     fused_experts: bool = False
 
 

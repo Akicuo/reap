@@ -23,7 +23,26 @@ If you find this work useful, consider [buying me a coffee](https://www.buymeaco
 Pruned models are available in two formats:
 
 - **Safetensors** - Standard HuggingFace format for vLLM and transformers
+  <!-- BEGIN-SFTNS -->
+  - [Akicou/GLM-4.7-Flash-REAP-09](https://huggingface.co/Akicou/GLM-4.7-Flash-REAP-09)
+  - [Akicou/GLM-4.7-Flash-REAP-19](https://huggingface.co/Akicou/GLM-4.7-Flash-REAP-19)
+  - [Akicou/GLM-4.7-Flash-REAP-39](https://huggingface.co/Akicou/GLM-4.7-Flash-REAP-39)
+  - [Akicou/GLM-4.7-Flash-REAP-50](https://huggingface.co/Akicou/GLM-4.7-Flash-REAP-50)
+  - [Akicou/INTELLECT-3-REAP-50-FP8-Dynamic](https://huggingface.co/Akicou/INTELLECT-3-REAP-50-FP8-Dynamic)
+  - [Akicou/Solar-Open-69B-REAP](https://huggingface.co/Akicou/Solar-Open-69B-REAP)
+  <!-- END-SFTNS -->
+
 - **GGUF** - For llama.cpp and compatible frontends
+  <!-- BEGIN-GGUF -->
+  - [Akicou/GLM-4.7-Flash-REAP-09-GGUF](https://huggingface.co/Akicou/GLM-4.7-Flash-REAP-09-GGUF)
+  - [Akicou/GLM-4.7-Flash-REAP-19-GGUF](https://huggingface.co/Akicou/GLM-4.7-Flash-REAP-19-GGUF)
+  - [Akicou/GLM-4.7-Flash-REAP-39-GGUF](https://huggingface.co/Akicou/GLM-4.7-Flash-REAP-39-GGUF)
+  - [Akicou/GLM-4.7-Flash-REAP-50-GGUF](https://huggingface.co/Akicou/GLM-4.7-Flash-REAP-50-GGUF)
+  - [Akicou/INTELLECT-3-REAP-50-GGUF](https://huggingface.co/Akicou/INTELLECT-3-REAP-50-GGUF)
+  - [Akicou/INTELLECT-3-REAP-50-heretic-GGUF](https://huggingface.co/Akicou/INTELLECT-3-REAP-50-heretic-GGUF)
+  - [Akicou/MiniMax-M2.1-REAP-40-GGUF](https://huggingface.co/Akicou/MiniMax-M2.1-REAP-40-GGUF)
+  - [Akicou/MiniMax-M2.1-REAP-50-GGUF](https://huggingface.co/Akicou/MiniMax-M2.1-REAP-50-GGUF)
+  <!-- END-GGUF -->
 
 *Check my HuggingFace profile for available models.*
 

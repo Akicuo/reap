@@ -75,6 +75,60 @@ for attr in ["mlp", "block_sparse_moe", "moe", "feed_forward"]:
         break
 ```
 
+### How to Detect Fused Experts
+
+Fused experts combine `gate_proj` and `up_proj` into a single tensor for efficiency. You need to know this to set the `"fused"` flag correctly.
+
+**Quick detection script:**
+
+```python
+from transformers import AutoModelForCausalLM
+
+model = AutoModelForCausalLM.from_pretrained("your-org/your-model", trust_remote_code=True)
+
+# Find MoE block
+for layer in model.model.layers:
+    for attr in ["mlp", "block_sparse_moe", "moe", "feed_forward"]:
+        if hasattr(layer, attr):
+            moe = getattr(layer, attr)
+            if hasattr(moe, 'experts'):
+                experts = moe.experts
+
+                # Check for fused experts
+                is_fused = hasattr(experts, 'gate_up_proj')
+
+                print(f"MoE class: {moe.__class__.__name__}")
+                print(f"Experts class: {experts.__class__.__name__}")
+                print(f"Fused: {is_fused}")
+
+                if is_fused:
+                    print(f"  gate_up_proj shape: {experts.gate_up_proj.shape}")
+                    print(f"  down_proj shape: {experts.down_proj.shape}")
+                else:
+                    # Check individual expert structure
+                    expert = experts[0]
+                    print(f"  Expert attributes: {[a for a in dir(expert) if not a.startswith('_')]}")
+                break
+```
+
+**Key differences:**
+
+| | Non-Fused | Fused |
+|--|-----------|-------|
+| **Structure** | `experts` is `ModuleList[Expert]` | `experts` is a single module with tensor weights |
+| **Projections** | Separate `gate_proj`, `up_proj`, `down_proj` per expert | Combined `gate_up_proj` tensor, separate `down_proj` |
+| **Weight Storage** | `[num_experts]` Module objects | Single tensor `[num_experts, 2*intermediate, hidden]` |
+| **Examples** | Qwen3, Mixtral, DeepSeek | Llama4, GLM-4.7-Flash |
+
+**Detection logic:**
+```python
+# If this exists -> FUSED
+moe.experts.gate_up_proj  # Tensor [num_experts, 2*intermediate_size, hidden_size]
+
+# If this exists -> NOT FUSED
+moe.experts[0].gate_proj  # nn.Linear for each expert separately
+```
+
 ### Special Cases
 
 **Fused Experts (like Llama4, GLM-4.7-Flash):**

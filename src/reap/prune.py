@@ -1159,7 +1159,9 @@ def main():
     if obs_args.load_observer_state:
         # Load observer state from file
         observer_state_path = obs_args.load_observer_state
-        if not os.path.exists(observer_state_path):
+        # Check if file exists using pathlib to avoid os import issues
+        from pathlib import Path
+        if not Path(observer_state_path).exists():
             raise FileNotFoundError(
                 f"Observer state file not found: {observer_state_path}. "
                 "Please check the path or run observation first without --load_observer_state."

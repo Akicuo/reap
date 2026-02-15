@@ -1154,26 +1154,39 @@ def main():
             patched_count = auto_patch_moe(model)
         if patched_count == 0:
             logger.warning(f"Could not patch any MoE blocks for {model_class_name}, observer may fail")
-    
+
     # record activations or load previously recorded activations
-    logger.info(
-        f"Running observer to collect activation data for model {model_args.model_name} on dataset {ds_args.dataset_name}."
-    )
-    observer_data = record_activations(
-        model,
-        tokenizer,
-        reap_args,
-        model_args,
-        ds_args,
-        obs_args,
-        results_dir,
-    )
-    if reap_args.run_observer_only:
+    if obs_args.load_observer_state:
+        # Load observer state from file
+        observer_state_path = obs_args.load_observer_state
+        if not os.path.exists(observer_state_path):
+            raise FileNotFoundError(
+                f"Observer state file not found: {observer_state_path}. "
+                "Please check the path or run observation first without --load_observer_state."
+            )
+        logger.info(f"Loading observer state from {observer_state_path}")
+        observer_data = torch.load(observer_state_path, weights_only=False)
+        logger.info(f"Loaded observer state with {len(observer_data)} layers")
+        # Skip the observer-only exit since we're loading saved data
+    else:
         logger.info(
-            "Observer run completed. Exiting after collecting activation data since "
-            "`run_observer_only` is set to True."
+            f"Running observer to collect activation data for model {model_args.model_name} on dataset {ds_args.dataset_name}."
         )
-        return
+        observer_data = record_activations(
+            model,
+            tokenizer,
+            reap_args,
+            model_args,
+            ds_args,
+            obs_args,
+            results_dir,
+        )
+        if reap_args.run_observer_only:
+            logger.info(
+                "Observer run completed. Exiting after collecting activation data since "
+                "`run_observer_only` is set to True."
+            )
+            return
 
     # pruning
     logger.info("Start of pruning")

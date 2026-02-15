@@ -154,6 +154,15 @@ class ObserverArgs:
         default=False,
         metadata={"help": "Whether to overwrite existing observer data files."},
     )
+    load_observer_state: str | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Path to a saved observer state file (.pt) to load instead of running observation. "
+                "If provided, skips the observation phase and uses the saved data directly."
+            )
+        },
+    )
     distance_measure: str = field(
         default="angular",
         metadata={

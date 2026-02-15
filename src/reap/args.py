@@ -64,6 +64,10 @@ class ReapArgs:
         default=False,
         metadata={"help": "Whether to automatically upload pruned models to HuggingFace with format: MODEL-REAP-{compression_pct}."},
     )
+    verify_model_config: bool = field(
+        default=True,
+        metadata={"help": "Whether to verify model configuration before starting pruning to catch errors early."},
+    )
     do_eval: bool = field(
         default=True,
         metadata={"help": "Whether to run evaluation after merging experts."},

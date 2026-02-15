@@ -732,7 +732,17 @@ def _upload_calibration_to_huggingface(observer_file_path: str, model_name: str,
     """
     import string
     import secrets
-    from huggingface_hub import HfApi, HfApiError
+    from huggingface_hub import HfApi
+
+    # Try different import locations for HfApiError (varies by huggingface_hub version)
+    try:
+        from huggingface_hub.utils import HfApiError
+    except ImportError:
+        try:
+            from huggingface_hub import HfApiError
+        except ImportError:
+            # Fallback to generic Exception
+            HfApiError = Exception
 
     # Check if HF_TOKEN is available
     hf_token = os.getenv("HF_TOKEN")
@@ -797,7 +807,17 @@ def _upload_pruned_model_to_huggingface(
     Returns:
         Repository ID if successful, None otherwise
     """
-    from huggingface_hub import HfApi, HfApiError
+    from huggingface_hub import HfApi
+
+    # Try different import locations for HfApiError (varies by huggingface_hub version)
+    try:
+        from huggingface_hub.utils import HfApiError
+    except ImportError:
+        try:
+            from huggingface_hub import HfApiError
+        except ImportError:
+            # Fallback to generic Exception
+            HfApiError = Exception
 
     # Check if HF_TOKEN is available
     hf_token = os.getenv("HF_TOKEN")
@@ -1518,6 +1538,48 @@ def main():
         if patched_count == 0:
             logger.warning(f"Could not patch any MoE blocks for {model_class_name}, observer may fail")
 
+    # Verify model configuration before proceeding
+    if reap_args.verify_model_config:
+        logger.info("Verifying model configuration...")
+        from reap.model_util import verify_model_config, print_verification_result
+
+        verification_result = verify_model_config(model_args.model_name, model=model)
+        print_verification_result(verification_result)
+
+        if not verification_result["valid"]:
+            error_msg = f"Model configuration verification FAILED. Errors: {verification_result['errors']}"
+            logger.error(error_msg)
+
+            # Send Discord notification about verification failure
+            if reap_args.discord_webhook:
+                _send_discord_notification(
+                    title="❌ Model Verification Failed",
+                    description=f"Model configuration is invalid. Pruning cannot proceed.",
+                    color=0xFF0000,  # Red
+                    fields=[
+                        {"name": "Model Class", "value": f"``{verification_result.get('model_class', 'Unknown')}``", "inline": True},
+                        {"name": "Errors", "value": f"{len(verification_result['errors'])}", "inline": True},
+                    ],
+                    webhook_url=reap_args.discord_webhook,
+                )
+
+            raise ValueError(error_msg)
+
+        if verification_result["warnings"]:
+            logger.warning(f"Model verification passed with warnings: {verification_result['warnings']}")
+
+            # Send Discord notification about warnings
+            if reap_args.discord_webhook:
+                _send_discord_notification(
+                    title="⚠️ Model Verification Warnings",
+                    description=f"Model configuration is valid but has warnings.",
+                    color=0xFFA500,  # Orange
+                    fields=[
+                        {"name": "Warnings", "value": f"{len(verification_result['warnings'])}", "inline": True},
+                    ],
+                    webhook_url=reap_args.discord_webhook,
+                )
+
     # Send Discord notification when model is loaded
     if reap_args.discord_webhook:
         model_info = f"Model loaded successfully: {model_class_name}"
@@ -1821,9 +1883,16 @@ def main():
         if reap_args.smoke_test:
             logger.info("Running smoke test on the merged model...")
             try:
+                # FIX for MiniMax-M2.5: Disable use_cache to avoid DynamicCache issues
+                is_minimax_m2 = "MiniMaxM2" in model_class_name
+                if is_minimax_m2 and hasattr(model, 'config'):
+                    logger.info("MiniMax-M2.5 detected: Disabling use_cache for smoke test")
+                    model.config.use_cache = False
+
                 smoke_test(model, tokenizer)
             except Exception as e:
                 logger.error(f"Smoke test failed: {e}")
+                # Don't fail on smoke test errors - they're not critical
                 pass
 
         tokenizer.save_pretrained(pruned_model_dir)

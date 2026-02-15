@@ -732,17 +732,7 @@ def _upload_calibration_to_huggingface(observer_file_path: str, model_name: str,
     """
     import string
     import secrets
-    from huggingface_hub import HfApi
-
-    # Try different import locations for HfApiError (varies by huggingface_hub version)
-    try:
-        from huggingface_hub.utils import HfApiError
-    except ImportError:
-        try:
-            from huggingface_hub import HfApiError
-        except ImportError:
-            # Fallback to generic Exception
-            HfApiError = Exception
+    from huggingface_hub import HfApi, create_repo
 
     # Check if HF_TOKEN is available
     hf_token = os.getenv("HF_TOKEN")
@@ -753,35 +743,42 @@ def _upload_calibration_to_huggingface(observer_file_path: str, model_name: str,
 
     api = HfApi(token=hf_token)
 
-    # Generate random 12-character repo name
-    random_suffix = ''.join(secrets.choice(string.ascii_lowercase) for _ in range(12))
-    repo_name = f"reap-calibration-{random_suffix}"
+    try:
+        # Get username for repo naming
+        user_info = api.whoami()
+        username = user_info['name']
+    except Exception as e:
+        logger.warning(f"Could not get username: {e}. Using 'reap-calibration' as repo name.")
+        username = "reap-calibration"
 
-    logger.info(f"Creating HuggingFace repository: {repo_name}")
+    # Generate random 12-character suffix
+    random_suffix = ''.join(secrets.choice(string.ascii_lowercase) for _ in range(12))
+    repo_id = f"{username}/reap-calibration-{random_suffix}"
+
+    logger.info(f"Creating HuggingFace repository: {repo_id}")
 
     try:
         # Create new repository
-        repo_url = api.create_repo(
-            repo_id=repo_name,
+        create_repo(
+            repo_id=repo_id,
+            token=hf_token,
             repo_type="model",
             private=False,
             exist_ok=True,
         )
-        logger.info(f"Created repository: {repo_url}")
+        logger.info(f"Created repository: {repo_id}")
 
         # Upload the observer state file
         logger.info(f"Uploading calibration file: {observer_file_path}")
         api.upload_file(
-            repo_id=repo_name,
+            repo_id=repo_id,
             path_or_fileobj=observer_file_path,
             path_in_repo=os.path.basename(observer_file_path),
         )
-        logger.info(f"Successfully uploaded calibration file to: https://huggingface.co/{repo_name}")
+        logger.info(f"Successfully uploaded calibration file to: https://huggingface.co/{repo_id}")
 
-    except HfApiError as e:
-        logger.error(f"Failed to upload calibration file to HuggingFace: {e}")
     except Exception as e:
-        logger.error(f"Unexpected error during HuggingFace upload: {e}")
+        logger.error(f"Failed to upload calibration file to HuggingFace: {e}")
 
 
 def _upload_pruned_model_to_huggingface(
@@ -794,7 +791,7 @@ def _upload_pruned_model_to_huggingface(
     """
     Upload pruned model to a new HuggingFace repository.
 
-    Creates a new repo with format: {MODEL}-REAP-{compression_pct}
+    Creates a new repo with format: {username}/{MODEL}-REAP-{compression_pct}
     where compression_pct is the percentage of experts removed.
 
     Args:
@@ -807,17 +804,7 @@ def _upload_pruned_model_to_huggingface(
     Returns:
         Repository ID if successful, None otherwise
     """
-    from huggingface_hub import HfApi
-
-    # Try different import locations for HfApiError (varies by huggingface_hub version)
-    try:
-        from huggingface_hub.utils import HfApiError
-    except ImportError:
-        try:
-            from huggingface_hub import HfApiError
-        except ImportError:
-            # Fallback to generic Exception
-            HfApiError = Exception
+    from huggingface_hub import HfApi, create_repo
 
     # Check if HF_TOKEN is available
     hf_token = os.getenv("HF_TOKEN")
@@ -836,20 +823,29 @@ def _upload_pruned_model_to_huggingface(
     clean_name = model_name.split("/")[-1] if "/" in model_name else model_name
     clean_name = clean_name.replace(".", "-").replace("_", "-")
 
-    # Create repo name: MODEL-REAP-{compression_pct}
-    repo_name = f"{clean_name}-REAP-{compression_pct}"
+    # Get username for repo naming
+    try:
+        user_info = api.whoami()
+        username = user_info['name']
+    except Exception as e:
+        logger.warning(f"Could not get username: {e}. Using 'reap-models' as repo name.")
+        username = "reap-models"
 
-    logger.info(f"Creating HuggingFace repository: {repo_name}")
+    # Create repo_id: {username}/{MODEL}-REAP-{compression_pct}
+    repo_id = f"{username}/{clean_name}-REAP-{compression_pct}"
+
+    logger.info(f"Targeting repo: {repo_id}")
 
     try:
         # Create new repository
-        repo_url = api.create_repo(
-            repo_id=repo_name,
+        create_repo(
+            repo_id=repo_id,
+            token=hf_token,
             repo_type="model",
             private=False,
             exist_ok=True,
         )
-        logger.info(f"Created repository: {repo_url}")
+        logger.info(f"Created repository: {repo_id}")
 
         # Create README with model info
         readme_content = f"""---
@@ -879,7 +875,7 @@ This is a pruned version of [`{model_name}`](https://huggingface.co/{model_name}
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-model_name = "{repo_name}"
+model_name = "{repo_id}"
 model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", trust_remote_code=True)
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 ```
@@ -904,11 +900,12 @@ REAP (Router-weighted Expert Activation Pruning) is a method for pruning Mixture
         # Upload all files from pruned model directory
         logger.info(f"Uploading pruned model from {pruned_model_dir}...")
         api.upload_folder(
-            repo_id=repo_name,
+            repo_id=repo_id,
             folder_path=pruned_model_dir,
             repo_type="model",
+            ignore_patterns=['.git*', '__pycache__*', '*.pyc', '*.log'],
         )
-        logger.info(f"Successfully uploaded pruned model to: https://huggingface.co/{repo_name}")
+        logger.info(f"Successfully uploaded pruned model to: https://huggingface.co/{repo_id}")
 
         # Send Discord notification if webhook is configured
         if reap_args.discord_webhook:
@@ -917,31 +914,21 @@ REAP (Router-weighted Expert Activation Pruning) is a method for pruning Mixture
                 description=f"Pruned model successfully uploaded",
                 color=0x00BFFF,  # Deep Sky Blue
                 fields=[
-                    {"name": "Repository", "value": f"[{repo_name}](https://huggingface.co/{repo_name})", "inline": False},
+                    {"name": "Repository", "value": f"[{repo_id}](https://huggingface.co/{repo_id})", "inline": False},
                     {"name": "Compression", "value": f"{compression_pct}%", "inline": True},
                     {"name": "Experts", "value": f"{remaining_experts}/{total_experts}", "inline": True},
                 ],
                 webhook_url=reap_args.discord_webhook,
             )
 
-        return repo_name
+        return repo_id
 
-    except HfApiError as e:
+    except Exception as e:
         logger.error(f"Failed to upload pruned model to HuggingFace: {e}")
         if reap_args.discord_webhook:
             _send_discord_notification(
                 title="❌ Upload Failed",
                 description=f"Failed to upload pruned model to HuggingFace: {e}",
-                color=0xFF0000,  # Red
-                webhook_url=reap_args.discord_webhook,
-            )
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error during HuggingFace upload: {e}")
-        if reap_args.discord_webhook:
-            _send_discord_notification(
-                title="❌ Upload Failed",
-                description=f"Unexpected error during upload: {e}",
                 color=0xFF0000,  # Red
                 webhook_url=reap_args.discord_webhook,
             )

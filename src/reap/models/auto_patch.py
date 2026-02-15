@@ -216,6 +216,7 @@ def patch_specific_model(model: nn.Module, model_class_name: str) -> int:
         "SolarOpenForCausalLM": _patch_solar_open,
         "LongcatCausalLM": _patch_longcat,
         "LongcatForCausalLM": _patch_longcat,
+        "MiniMaxM2ForCausalLM": _patch_minimax_m2,
         # Add more specific patchers here as needed
     }
     
@@ -337,7 +338,26 @@ def _patch_longcat(model: nn.Module) -> int:
     
     if patched_count > 0:
         logger.info(f"[patch_longcat] Patched {patched_count} LongcatMoE layers")
-    
+
+    return patched_count
+
+
+def _patch_minimax_m2(model: nn.Module) -> int:
+    """Specific patcher for MiniMaxAI/MiniMax-M2.5 to fix DynamicCache compatibility.
+
+    The model uses DynamicCache which has compatibility issues with some transformers versions.
+    This patch disables dynamic cache to use standard cache instead.
+    """
+    patched_count = 0
+
+    # Patch the model config to use cache that doesn't require max_cache_len
+    if hasattr(model, 'config'):
+        # Force use_cache to False to avoid DynamicCache initialization
+        original_use_cache = model.config.use_cache
+        model.config.use_cache = False
+        logger.info(f"Disabled use_cache for MiniMaxM2ForCausalLM to avoid DynamicCache compatibility issues")
+        patched_count += 1
+
     return patched_count
 
 

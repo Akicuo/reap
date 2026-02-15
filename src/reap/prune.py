@@ -539,15 +539,37 @@ def reload_model_in_full_precision(
         logger.info("Model is pre-quantized, will load with native quantization (no extra config needed)")
     
     # For pre-quantized models, we still load without additional quantization
+    # Special handling for MiniMax-M2.5 which has None quantization_config in config
+    is_minimax_m2 = "minimax" in model_name.lower()
+
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,  # Force bfloat16
-            trust_remote_code=True,
-            local_files_only=local_only,
-            quantization_config=final_quant_config,  # Use the correct config
-        )
+        if is_minimax_m2:
+            # Load config first and fix quantization_config
+            from transformers import AutoConfig
+            config = AutoConfig.from_pretrained(model_name, trust_remote_code=True, local_files_only=local_only)
+            # Fix None quantization_config
+            if hasattr(config, 'quantization_config') and config.quantization_config is None:
+                delattr(config, 'quantization_config')
+                logger.info("Removed None quantization_config from MiniMax-M2 config")
+            # Load with fixed config
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                config=config,
+                device_map="auto",
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True,
+                local_files_only=local_only,
+            )
+        else:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                device_map="auto",
+                torch_dtype=torch.bfloat16,  # Force bfloat16
+                trust_remote_code=True,
+                local_files_only=local_only,
+                quantization_config=final_quant_config,  # Use the correct config
+                ignore_mismatched_sizes=True,
+            )
     except TypeError as dtype_error:
         # Some models with custom code don't accept torch_dtype parameter
         if "unexpected keyword argument" in str(dtype_error):

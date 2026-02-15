@@ -1253,6 +1253,15 @@ def main():
             )
         return model
 
+    # OPTIMIZATION: Pre-load model once for multi-ratio pruning
+    if multi_ratio and model is None:
+        if obs_args.load_in_4bit:
+            logger.info("4-bit quantization was used for observer analysis.")
+            logger.info("Loading model in full precision (bfloat16) ONCE for all compression ratios...")
+        else:
+            logger.info("Loading model in full precision (bfloat16) for pruning...")
+        model = _load_model_for_pruning(force_reload=True)
+
     for n_experts_to_prune in n_experts_to_prune_list:
         pruned_model_dir = get_pruned_model_dir(
             results_dir, n_experts_to_prune, total_experts, prune_args, reap_args.seed, obs_args.renormalize_router_weights
@@ -1274,7 +1283,12 @@ def main():
         if obs_args.load_in_4bit or multi_ratio:
             logger.info("Reloading model in full precision (bfloat16) for pruning...")
 
-        model = _load_model_for_pruning(force_reload=multi_ratio)
+        # OPTIMIZATION: For multi-ratio, model is already pre-loaded above; skip reloading
+        if not multi_ratio:
+            model = _load_model_for_pruning(force_reload=True)
+        elif model is None:
+            # Fallback: ensure model is loaded for multi_ratio case
+            model = _load_model_for_pruning(force_reload=True)
 
         if prune_args.prune_method == "under_average":
             logger.info("Pruning model with under_average per-layer thresholds...")

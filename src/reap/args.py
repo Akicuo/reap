@@ -52,6 +52,18 @@ class ReapArgs:
         default=False,
         metadata={"help": "Whether to only run the observer to collect activation data."},
     )
+    upload_calibration_to_hf: bool = field(
+        default=False,
+        metadata={"help": "Whether to automatically upload calibration .pt file to a new HuggingFace repo with a random name."},
+    )
+    discord_webhook: str | None = field(
+        default=None,
+        metadata={"help": "Discord webhook URL to send progress notifications during pruning."},
+    )
+    upload_pruned_to_hf: bool = field(
+        default=False,
+        metadata={"help": "Whether to automatically upload pruned models to HuggingFace with format: MODEL-REAP-{compression_pct}."},
+    )
     do_eval: bool = field(
         default=True,
         metadata={"help": "Whether to run evaluation after merging experts."},

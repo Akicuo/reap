@@ -724,6 +724,353 @@ def reload_model_in_full_precision(
     return model
 
 
+def _upload_calibration_to_huggingface(observer_file_path: str, model_name: str, reap_args: ReapArgs) -> None:
+    """
+    Upload calibration observer state file to a new HuggingFace repository.
+
+    Creates a new repo with a random 12-character name and uploads the .pt file.
+    """
+    import string
+    import secrets
+    from huggingface_hub import HfApi, HfApiError
+
+    # Check if HF_TOKEN is available
+    hf_token = os.getenv("HF_TOKEN")
+    if not hf_token:
+        logger.error("HF_TOKEN environment variable not set. Cannot upload to HuggingFace.")
+        logger.info("Set HF_TOKEN with: export HF_TOKEN=your_token")
+        return
+
+    api = HfApi(token=hf_token)
+
+    # Generate random 12-character repo name
+    random_suffix = ''.join(secrets.choice(string.ascii_lowercase) for _ in range(12))
+    repo_name = f"reap-calibration-{random_suffix}"
+
+    logger.info(f"Creating HuggingFace repository: {repo_name}")
+
+    try:
+        # Create new repository
+        repo_url = api.create_repo(
+            repo_id=repo_name,
+            repo_type="model",
+            private=False,
+            exist_ok=True,
+        )
+        logger.info(f"Created repository: {repo_url}")
+
+        # Upload the observer state file
+        logger.info(f"Uploading calibration file: {observer_file_path}")
+        api.upload_file(
+            repo_id=repo_name,
+            path_or_fileobj=observer_file_path,
+            path_in_repo=os.path.basename(observer_file_path),
+        )
+        logger.info(f"Successfully uploaded calibration file to: https://huggingface.co/{repo_name}")
+
+    except HfApiError as e:
+        logger.error(f"Failed to upload calibration file to HuggingFace: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error during HuggingFace upload: {e}")
+
+
+def _upload_pruned_model_to_huggingface(
+    pruned_model_dir: pathlib.Path,
+    model_name: str,
+    total_experts: int,
+    remaining_experts: int,
+    reap_args: ReapArgs,
+) -> str | None:
+    """
+    Upload pruned model to a new HuggingFace repository.
+
+    Creates a new repo with format: {MODEL}-REAP-{compression_pct}
+    where compression_pct is the percentage of experts removed.
+
+    Args:
+        pruned_model_dir: Directory containing the pruned model
+        model_name: Original model name
+        total_experts: Original number of experts per layer
+        remaining_experts: Number of experts after pruning
+        reap_args: REAP arguments
+
+    Returns:
+        Repository ID if successful, None otherwise
+    """
+    from huggingface_hub import HfApi, HfApiError
+
+    # Check if HF_TOKEN is available
+    hf_token = os.getenv("HF_TOKEN")
+    if not hf_token:
+        logger.error("HF_TOKEN environment variable not set. Cannot upload pruned model to HuggingFace.")
+        logger.info("Set HF_TOKEN with: export HF_TOKEN=your_token")
+        return None
+
+    api = HfApi(token=hf_token)
+
+    # Calculate compression percentage
+    compression_pct = int((1 - (remaining_experts / total_experts)) * 100) if total_experts > 0 else 0
+
+    # Clean model name to create valid repo name
+    # Remove org prefix and clean special characters
+    clean_name = model_name.split("/")[-1] if "/" in model_name else model_name
+    clean_name = clean_name.replace(".", "-").replace("_", "-")
+
+    # Create repo name: MODEL-REAP-{compression_pct}
+    repo_name = f"{clean_name}-REAP-{compression_pct}"
+
+    logger.info(f"Creating HuggingFace repository: {repo_name}")
+
+    try:
+        # Create new repository
+        repo_url = api.create_repo(
+            repo_id=repo_name,
+            repo_type="model",
+            private=False,
+            exist_ok=True,
+        )
+        logger.info(f"Created repository: {repo_url}")
+
+        # Create README with model info
+        readme_content = f"""---
+license: other
+base_model: {model_name}
+tags:
+- moe
+- mixture-of-experts
+- pruning
+- reap
+- quantized
+---
+
+# {model_name} - REAP Pruned ({compression_pct}% Compression)
+
+This is a pruned version of [`{model_name}`](https://huggingface.co/{model_name}) using **REAP** (Router-weighted Expert Activation Pruning).
+
+## Pruning Details
+
+- **Original Experts per Layer**: {total_experts}
+- **Remaining Experts per Layer**: {remaining_experts}
+- **Compression**: {compression_pct}%
+- **Method**: REAP (Router-weighted Expert Activation Pruning)
+
+## Usage
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model_name = "{repo_name}"
+model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+```
+
+## Original Model
+
+[`{model_name}`](https://huggingface.co/{model_name})
+
+## REAP
+
+REAP (Router-weighted Expert Activation Pruning) is a method for pruning Mixture-of-Experts (MoE) models by analyzing router activations during inference.
+
+- **GitHub**: [CerebrasResearch/reap](https://github.com/CerebrasResearch/reap)
+- **Paper**: [REAP: Pruning MoE Models via Router Weighted Expert Activation](https://arxiv.org/abs/...)
+"""
+
+        # Upload README
+        readme_path = pruned_model_dir / "README.md"
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.write(readme_content)
+
+        # Upload all files from pruned model directory
+        logger.info(f"Uploading pruned model from {pruned_model_dir}...")
+        api.upload_folder(
+            repo_id=repo_name,
+            folder_path=pruned_model_dir,
+            repo_type="model",
+        )
+        logger.info(f"Successfully uploaded pruned model to: https://huggingface.co/{repo_name}")
+
+        # Send Discord notification if webhook is configured
+        if reap_args.discord_webhook:
+            _send_discord_notification(
+                title="📤 Model Uploaded to HuggingFace",
+                description=f"Pruned model successfully uploaded",
+                color=0x00BFFF,  # Deep Sky Blue
+                fields=[
+                    {"name": "Repository", "value": f"[{repo_name}](https://huggingface.co/{repo_name})", "inline": False},
+                    {"name": "Compression", "value": f"{compression_pct}%", "inline": True},
+                    {"name": "Experts", "value": f"{remaining_experts}/{total_experts}", "inline": True},
+                ],
+                webhook_url=reap_args.discord_webhook,
+            )
+
+        return repo_name
+
+    except HfApiError as e:
+        logger.error(f"Failed to upload pruned model to HuggingFace: {e}")
+        if reap_args.discord_webhook:
+            _send_discord_notification(
+                title="❌ Upload Failed",
+                description=f"Failed to upload pruned model to HuggingFace: {e}",
+                color=0xFF0000,  # Red
+                webhook_url=reap_args.discord_webhook,
+            )
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error during HuggingFace upload: {e}")
+        if reap_args.discord_webhook:
+            _send_discord_notification(
+                title="❌ Upload Failed",
+                description=f"Unexpected error during upload: {e}",
+                color=0xFF0000,  # Red
+                webhook_url=reap_args.discord_webhook,
+            )
+        return None
+
+
+import asyncio
+import aiohttp
+import json
+from datetime import datetime
+
+
+class DiscordWebhookNotifier:
+    """Async Discord webhook notifier for REAP progress updates."""
+
+    def __init__(self, webhook_url: str):
+        self.webhook_url = webhook_url
+        self.session = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create aiohttp session."""
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession()
+        return self.session
+
+    async def send_message(
+        self,
+        title: str,
+        description: str,
+        color: int = 0x5865F2,  # Discord blurple
+        fields: list[dict[str, Any]] | None = None,
+        footer: str | None = None,
+    ) -> bool:
+        """
+        Send an embed message to Discord webhook.
+
+        Args:
+            title: Embed title
+            description: Embed description
+            color: Embed color (default: Discord blurple)
+            fields: List of field dicts with name, value, inline
+            footer: Footer text
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.webhook_url:
+            return False
+
+        try:
+            session = await self._get_session()
+
+            embed = {
+                "title": title,
+                "description": description,
+                "color": color,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            }
+
+            if fields:
+                embed["fields"] = fields
+
+            if footer:
+                embed["footer"] = {"text": footer}
+
+            payload = {"embeds": [embed]}
+
+            async with session.post(
+                self.webhook_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            ) as response:
+                if response.status in (200, 204):
+                    return True
+                else:
+                    error_text = await response.text()
+                    logger.warning(f"Discord webhook failed: {response.status} - {error_text}")
+                    return False
+
+        except Exception as e:
+            logger.warning(f"Failed to send Discord webhook: {e}")
+            return False
+
+    async def close(self):
+        """Close the aiohttp session."""
+        if self.session and not self.session.closed:
+            await self.session.close()
+
+
+# Global notifier instance
+_discord_notifier: DiscordWebhookNotifier | None = None
+
+
+def _send_discord_notification(
+    title: str,
+    description: str,
+    color: int = 0x5865F2,
+    fields: list[dict[str, Any]] | None = None,
+    footer: str | None = None,
+    webhook_url: str | None = None,
+) -> None:
+    """
+    Synchronous wrapper for sending Discord notifications.
+
+    Runs async webhook call in event loop to avoid blocking main thread.
+    """
+    global _discord_notifier
+
+    # Determine webhook URL
+    url = webhook_url or getattr(_discord_notifier, 'webhook_url', None) if _discord_notifier else None
+    if not url:
+        return
+
+    # Create notifier if needed
+    if _discord_notifier is None:
+        _discord_notifier = DiscordWebhookNotifier(url)
+    elif webhook_url and webhook_url != _discord_notifier.webhook_url:
+        # Close old session and create new notifier with different URL
+        async def _recreate():
+            if _discord_notifier.session:
+                await _discord_notifier.close()
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(_recreate())
+            else:
+                loop.run_until_complete(_recreate())
+        except Exception:
+            pass
+        _discord_notifier = DiscordWebhookNotifier(url)
+
+    # Run async send
+    async def _send():
+        return await _discord_notifier.send_message(title, description, color, fields, footer)
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Create task but don't await - fire and forget
+            asyncio.create_task(_send())
+        else:
+            loop.run_until_complete(_send())
+    except RuntimeError:
+        # No event loop, create new one
+        asyncio.run(_send())
+    except Exception as e:
+        logger.warning(f"Failed to send Discord notification: {e}")
+
+
 def main():
     parser = HfArgumentParser(
         (
@@ -739,6 +1086,22 @@ def main():
     reap_args, ds_args, obs_args, model_args, eval_args, prune_args, cluster_args = (
         parser.parse_args_into_dataclasses()
     )
+
+    # Send Discord notification on start
+    if reap_args.discord_webhook:
+        _send_discord_notification(
+            title="🚀 REAP Pruning Started",
+            description=f"Starting REAP (Router-weighted Expert Activation Pruning) process",
+            color=0x00FF00,  # Green
+            fields=[
+                {"name": "Model", "value": f"``{model_args.model_name}``", "inline": False},
+                {"name": "Dataset", "value": f"``{ds_args.dataset_name}``", "inline": True},
+                {"name": "Prune Method", "value": f"``{prune_args.prune_method}``", "inline": True},
+                {"name": "Compression Ratio", "value": f"``{cluster_args.compression_ratio}``", "inline": True},
+            ],
+            webhook_url=reap_args.discord_webhook,
+        )
+
     if prune_args.perserve_super_experts and prune_args.perserve_outliers:
         raise ValueError("Only one of perserve_super_experts or perserve_outliers can be set to True.")
     set_seed(reap_args.seed)
@@ -1155,6 +1518,26 @@ def main():
         if patched_count == 0:
             logger.warning(f"Could not patch any MoE blocks for {model_class_name}, observer may fail")
 
+    # Send Discord notification when model is loaded
+    if reap_args.discord_webhook:
+        model_info = f"Model loaded successfully: {model_class_name}"
+        if obs_args.load_in_4bit:
+            model_info += " (4-bit quantized)"
+        if is_pre_quantized:
+            model_info += f" (Pre-quantized: {pre_quant_config})"
+
+        _send_discord_notification(
+            title="✅ Model Loaded",
+            description=model_info,
+            color=0x00BFFF,  # Deep Sky Blue
+            fields=[
+                {"name": "Model Class", "value": f"``{model_class_name}``", "inline": True},
+                {"name": "Quantized", "value": "Yes" if (obs_args.load_in_4bit or is_pre_quantized) else "No", "inline": True},
+                {"name": "Patched", "value": f"{patched_count} blocks" if patched_count > 0 else "Not needed", "inline": True},
+            ],
+            webhook_url=reap_args.discord_webhook,
+        )
+
     # record activations or load previously recorded activations
     if obs_args.load_observer_state:
         # Load observer state from file
@@ -1169,11 +1552,70 @@ def main():
         logger.info(f"Loading observer state from {observer_state_path}")
         observer_data = torch.load(observer_state_path, weights_only=False)
         logger.info(f"Loaded observer state with {len(observer_data)} layers")
+        # Upload calibration file to HF if requested
+        if reap_args.upload_calibration_to_hf:
+            _upload_calibration_to_huggingface(observer_state_path, model_args.model_name, reap_args)
         # Skip the observer-only exit since we're loading saved data
     else:
         logger.info(
             f"Running observer to collect activation data for model {model_args.model_name} on dataset {ds_args.dataset_name}."
         )
+
+        # Send Discord notification when starting observation
+        if reap_args.discord_webhook:
+            _send_discord_notification(
+                title="🔍 Starting Observation",
+                description=f"Collecting activation data from dataset",
+                color=0xFFD700,  # Gold
+                fields=[
+                    {"name": "Dataset", "value": f"``{ds_args.dataset_name}``", "inline": True},
+                    {"name": "Samples", "value": f"{obs_args.samples_per_category}", "inline": True},
+                    {"name": "Distance Measure", "value": f"``{obs_args.distance_measure}``", "inline": True},
+                ],
+                webhook_url=reap_args.discord_webhook,
+            )
+
+        # Create progress callback for dataset observation
+        def _dataset_progress_callback(event_type: str, data: dict[str, Any]) -> None:
+            """Callback for dataset observation progress notifications."""
+            if not reap_args.discord_webhook:
+                return
+
+            if event_type == "category_start":
+                _send_discord_notification(
+                    title=f"📂 Category: {data.get('category', 'Unknown')}",
+                    description=f"Starting observation of category **{data.get('category', 'Unknown')}**",
+                    color=0xFFA500,  # Orange
+                    fields=[
+                        {"name": "Samples", "value": f"{data.get('total_samples', 'N/A')}", "inline": True},
+                        {"name": "Total Categories", "value": f"{data.get('total_categories', 'N/A')}", "inline": True},
+                    ],
+                    webhook_url=reap_args.discord_webhook,
+                )
+            elif event_type == "category_progress":
+                progress = data.get('progress', 0)
+                emoji = "🔹" if progress < 50 else "🔸" if progress < 75 else "🔶"
+                _send_discord_notification(
+                    title=f"{emoji} Category Progress: {data.get('category', 'Unknown')}",
+                    description=f"Processing samples: **{data.get('completed', 0)}** / **{data.get('total', 0)}** ({progress:.0f}%)",
+                    color=0xFFA500,  # Orange
+                    webhook_url=reap_args.discord_webhook,
+                )
+            elif event_type == "category_complete":
+                _send_discord_notification(
+                    title=f"✅ Category Complete: {data.get('category', 'Unknown')}",
+                    description=f"Finished processing **{data.get('total_samples', 0)}** samples",
+                    color=0x00FF7F,  # Spring Green
+                    webhook_url=reap_args.discord_webhook,
+                )
+            elif event_type == "category_skip":
+                _send_discord_notification(
+                    title=f"⏭️ Category Skipped: {data.get('category', 'Unknown')}",
+                    description=f"Skipping category: {data.get('reason', 'Unknown reason')}",
+                    color=0x808080,  # Gray
+                    webhook_url=reap_args.discord_webhook,
+                )
+
         observer_data = record_activations(
             model,
             tokenizer,
@@ -1182,12 +1624,44 @@ def main():
             ds_args,
             obs_args,
             results_dir,
+            progress_callback=_dataset_progress_callback if reap_args.discord_webhook else None,
         )
+            model,
+            tokenizer,
+            reap_args,
+            model_args,
+            ds_args,
+            obs_args,
+            results_dir,
+        )
+
+        # Send Discord notification when observation completes
+        if reap_args.discord_webhook:
+            layers_observed = len(observer_data)
+            _send_discord_notification(
+                title="✅ Observation Complete",
+                description=f"Successfully collected activation data from {layers_observed} layers",
+                color=0x00CED1,  # Dark Turquoise
+                fields=[
+                    {"name": "Layers Observed", "value": f"{layers_observed}", "inline": True},
+                    {"name": "Dataset", "value": f"``{ds_args.dataset_name}``", "inline": True},
+                    {"name": "Distance", "value": f"``{obs_args.distance_measure}``", "inline": True},
+                ],
+                webhook_url=reap_args.discord_webhook,
+            )
+
         if reap_args.run_observer_only:
             logger.info(
                 "Observer run completed. Exiting after collecting activation data since "
                 "`run_observer_only` is set to True."
             )
+            # Upload calibration file to HF if requested before exiting
+            if reap_args.upload_calibration_to_hf:
+                # Get the path to the saved observer file
+                from pathlib import Path
+                obs_file = Path(results_dir) / ds_args.dataset_config_name / obs_args.output_file_name
+                if obs_file.exists():
+                    _upload_calibration_to_huggingface(str(obs_file), model_args.model_name, reap_args)
             return
 
     # pruning
@@ -1225,6 +1699,25 @@ def main():
                 logger.info(
                     f"Calculated n_experts to prune: {n_to_prune} from compression_ratio: {ratio}"
                 )
+
+    # Send Discord notification when starting pruning
+    if reap_args.discord_webhook:
+        # Format compression ratios for display
+        ratios_str = ", ".join([f"{r:.1%}" for r in compression_ratios]) if compression_ratios else "N/A"
+        experts_str = ", ".join([str(n) for n in n_experts_to_prune_list]) if n_experts_to_prune_list else "N/A"
+
+        _send_discord_notification(
+            title="✂️ Starting Pruning",
+            description=f"Beginning expert pruning with {total_experts} total experts per layer",
+            color=0xFF6347,  # Tomato Red
+            fields=[
+                {"name": "Method", "value": f"``{prune_args.prune_method}``", "inline": True},
+                {"name": "Total Experts", "value": f"{total_experts}", "inline": True},
+                {"name": "Compression", "value": f"{ratios_str}", "inline": True},
+                {"name": "Experts to Remove", "value": f"{experts_str}", "inline": True},
+            ],
+            webhook_url=reap_args.discord_webhook,
+        )
 
     # Extract category-expert map from observer data if available
     category_expert_map = None
@@ -1314,6 +1807,24 @@ def main():
         )
         logger.info("pruning completed.")
 
+        # Send Discord notification when each compression ratio completes
+        if reap_args.discord_webhook:
+            remaining_experts = total_experts - n_experts_to_prune
+            compression_pct = (1 - (remaining_experts / total_experts)) * 100 if total_experts > 0 else 0
+
+            _send_discord_notification(
+                title="✅ Pruning Completed",
+                description=f"Successfully pruned model from {total_experts} to {remaining_experts} experts",
+                color=0x32CD32,  # Lime Green
+                fields=[
+                    {"name": "Original Experts", "value": f"{total_experts}", "inline": True},
+                    {"name": "Remaining Experts", "value": f"{remaining_experts}", "inline": True},
+                    {"name": "Compression", "value": f"{compression_pct:.1f}%", "inline": True},
+                    {"name": "Output Dir", "value": f"``{pruned_model_dir.name}``", "inline": False},
+                ],
+                webhook_url=reap_args.discord_webhook,
+            )
+
         # smoke test
         if reap_args.smoke_test:
             logger.info("Running smoke test on the merged model...")
@@ -1350,6 +1861,22 @@ def main():
         )
         pruned_model_dirs.append(pruned_model_dir)
 
+        # Upload pruned model to HuggingFace if requested
+        if reap_args.upload_pruned_to_hf:
+            logger.info("Uploading pruned model to HuggingFace...")
+            remaining_experts = total_experts - n_experts_to_prune
+            repo_id = _upload_pruned_model_to_huggingface(
+                pruned_model_dir=pruned_model_dir,
+                model_name=model_args.model_name,
+                total_experts=total_experts,
+                remaining_experts=remaining_experts,
+                reap_args=reap_args,
+            )
+            if repo_id:
+                logger.info(f"Successfully uploaded pruned model to: https://huggingface.co/{repo_id}")
+            else:
+                logger.warning("Failed to upload pruned model to HuggingFace, continuing anyway...")
+
     # eval
     if reap_args.do_eval and pruned_model_dirs:
         from reap.eval import run_evaluate
@@ -1360,9 +1887,41 @@ def main():
         del observer_data
         torch.cuda.empty_cache()
         gc.collect()
+
+        # Send Discord notification before starting evaluation
+        if reap_args.discord_webhook:
+            _send_discord_notification(
+                title="📊 Starting Evaluation",
+                description=f"Evaluating {len(pruned_model_dirs)} pruned model(s)",
+                color=0x9370DB,  # Medium Purple
+                fields=[
+                    {"name": "Models to Evaluate", "value": f"{len(pruned_model_dirs)}", "inline": True},
+                    {"name": "Tasks", "value": f"{len(eval_args.lm_eval_tasks)} lm-eval tasks", "inline": True},
+                ],
+                webhook_url=reap_args.discord_webhook,
+            )
+
         for pruned_model_dir in pruned_model_dirs:
             model_args.model_name = pruned_model_dir
             run_evaluate(model_args, pruned_model_dir / "eval", eval_args, reap_args.seed)
+
+    # Send Discord notification on completion
+    if reap_args.discord_webhook:
+        total_models = len(pruned_model_dirs)
+        completion_msg = f"REAP pruning completed successfully! {total_models} model(s) pruned and saved."
+
+        _send_discord_notification(
+            title="🎉 REAP Process Complete",
+            description=completion_msg,
+            color=0x00FF7F,  # Spring Green
+            fields=[
+                {"name": "Total Models", "value": f"{total_models}", "inline": True},
+                {"name": "Evaluation", "value": "Completed" if reap_args.do_eval else "Skipped", "inline": True},
+                {"name": "Results Dir", "value": f"``{results_dir.name}``", "inline": False},
+            ],
+            footer="REAP - Router-weighted Expert Activation Pruning",
+            webhook_url=reap_args.discord_webhook,
+        )
 
 
 if __name__ == "__main__":

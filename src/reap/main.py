@@ -299,8 +299,12 @@ def create_combined_dataset(samples_per_dataset: int = 50):
 
 
 def record_activations(
-    model, tokenizer, reap_args, model_args, ds_args, obs_args, results_dir
+    model, tokenizer, reap_args, model_args, ds_args, obs_args, results_dir, progress_callback=None
 ):
+    def _notify_progress(event_type, data=None):
+        """Helper to call progress callback if provided."""
+        if progress_callback is not None:
+            progress_callback(event_type, data or {})
     if ds_args.dataset_name == "combined":
         # Check if combined data already exists
         cat_dir = results_dir / "all"
@@ -395,10 +399,37 @@ def record_activations(
                 logger.info("Processing combined dataset samples...")
                 for category, cat_data in category_data_batches.items():
                     logger.info(f"Processing category: {category}...")
+                    # Notify progress: category started
+                    _notify_progress("category_start", {
+                        "category": category,
+                        "total_samples": len(cat_data),
+                        "total_categories": len(category_data_batches),
+                    })
+
                     # Set category for per-category expert frequency tracking
                     observer.set_category(category)
-                    for sample in tqdm(cat_data, desc=f"Processing {category} samples"):
+
+                    total_samples = len(cat_data)
+                    for idx, sample in enumerate(cat_data):
                         model(sample.to(model.device))
+
+                        # Notify progress at 25%, 50%, 75%, 100%
+                        progress_pct = (idx + 1) / total_samples
+                        milestones = [0.25, 0.5, 0.75, 1.0]
+                        for milestone in milestones:
+                            if progress_pct >= milestone and (idx == 0 or progress_pct - milestone < 1.0 / total_samples):
+                                _notify_progress("category_progress", {
+                                    "category": category,
+                                    "progress": round(milestone * 100, 0),
+                                    "completed": idx + 1,
+                                    "total": total_samples,
+                                })
+
+                    # Notify progress: category completed
+                    _notify_progress("category_complete", {
+                        "category": category,
+                        "total_samples": total_samples,
+                    })
             except Exception as e:
                 logger.error(f"Error processing combined dataset")
                 logger.info("Saving partial results and exiting")
@@ -506,9 +537,17 @@ def record_activations(
         with torch.no_grad():
             for category, cat_data in category_data_batches.items():
                 logger.info(f"Processing category: {category}...")
+
+                # Notify progress: category started
+                _notify_progress("category_start", {
+                    "category": category,
+                    "total_samples": len(cat_data),
+                    "total_categories": len(category_data_batches),
+                })
+
                 # Set category for per-category expert frequency tracking
                 observer.set_category(category)
-                
+
                 cat_dir = results_dir / str_to_directory_name(category)
                 cat_dir.mkdir(parents=True, exist_ok=True)
                 f_name = cat_dir / obs_args.output_file_name
@@ -516,11 +555,29 @@ def record_activations(
                     logger.info(
                         f"Category '{category}' previously processed. Skipping to next category..."
                     )
+                    # Notify progress: category skipped
+                    _notify_progress("category_skip", {
+                        "category": category,
+                        "reason": "Already processed",
+                    })
                     continue
                 try:
                     logger.info("No previous data found @ %s", f_name)
-                    for sample in tqdm(cat_data, desc=f"Processing {category} samples"):
+                    total_samples = len(cat_data)
+                    for idx, sample in enumerate(tqdm(cat_data, desc=f"Processing {category} samples")):
                         model(sample.to(model.device))
+
+                        # Notify progress at 25%, 50%, 75%, 100%
+                        progress_pct = (idx + 1) / total_samples
+                        milestones = [0.25, 0.5, 0.75, 1.0]
+                        for milestone in milestones:
+                            if progress_pct >= milestone and (idx == 0 or progress_pct - milestone < 1.0 / total_samples):
+                                _notify_progress("category_progress", {
+                                    "category": category,
+                                    "progress": round(milestone * 100, 0),
+                                    "completed": idx + 1,
+                                    "total": total_samples,
+                                })
                 except Exception as e:
                     logger.error(f"Error processing category '{category}'")
                     logger.info(
@@ -538,6 +595,12 @@ def record_activations(
                     f"{category} data processed and saved to "
                     f"{cat_dir / obs_args.output_file_name}"
                 )
+
+                # Notify progress: category completed
+                _notify_progress("category_complete", {
+                    "category": category,
+                    "total_samples": total_samples,
+                })
         observer.close_hooks()
         with open(f"{cat_dir / obs_args.output_file_name}", "rb") as f:
             observer_data = torch.load(f, weights_only=False)

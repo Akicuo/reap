@@ -1626,14 +1626,6 @@ def main():
             results_dir,
             progress_callback=_dataset_progress_callback if reap_args.discord_webhook else None,
         )
-            model,
-            tokenizer,
-            reap_args,
-            model_args,
-            ds_args,
-            obs_args,
-            results_dir,
-        )
 
         # Send Discord notification when observation completes
         if reap_args.discord_webhook:

@@ -1,5 +1,6 @@
 import torch
 import logging
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +217,18 @@ MODEL_ATTRS = {
         "router_weight_attr": "classifier.weight",
         "num_experts": "n_routed_experts",
         "num_experts_per_tok": "moe_topk",
+    },
+    # MiniMaxAI/MiniMax-M2.5 - Uses w1/w2/w3 projections, MoE block at block_sparse_moe
+    "MiniMaxM2ForCausalLM": {
+        "moe_block": "block_sparse_moe",
+        "gate_proj": "w1",
+        "up_proj": "w3",
+        "down_proj": "w2",
+        "experts": "experts",
+        "fused": False,
+        "router": "gate",
+        "num_experts": "num_local_experts",
+        "num_experts_per_tok": "num_experts_per_tok",
     },
 
 }
@@ -503,6 +516,235 @@ def get_super_expert_indices(observer_data, include_last_layers: bool = False):
     super_expert_idx = torch.argwhere(super_experts_mask)
     logger.info(f"Identified {super_experts_mask.sum().item()} super experts with threshold: {final_threshold:.4f}")
     return super_expert_idx
+
+
+def verify_model_config(model_name: str, model=None) -> dict[str, Any]:
+    """
+    Verify that all model configurations are correct for REAP pruning.
+
+    Args:
+        model_name: Name of the model to verify
+        model: Optional pre-loaded model instance. If None, will try to load.
+
+    Returns:
+        Dictionary with verification results:
+        {
+            "valid": bool,
+            "model_class": str,
+            "model_attrs": dict | None,
+            "observer_config": str | None,
+            "errors": list[str],
+            "warnings": list[str],
+            "details": dict,
+        }
+    """
+    from transformers import AutoConfig, AutoModelForCausalLM
+    from reap.observer import OBSERVER_CONFIG_REGISTRY
+    import traceback as tb
+
+    errors = []
+    warnings = []
+    details = {}
+
+    logger.info(f"Verifying model configuration for: {model_name}")
+
+    # Step 1: Get model class name
+    try:
+        if model is None:
+            config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+            model_class = config.architectures[0] if config.architectures else None
+            details["config_class"] = config.__class__.__name__
+        else:
+            model_class = model.__class__.__name__
+
+        if not model_class:
+            errors.append("Could not determine model class from config.architectures")
+            return _format_verification_result(False, None, None, errors, warnings, details)
+
+        details["model_class"] = model_class
+        logger.info(f"Model class: {model_class}")
+
+    except Exception as e:
+        errors.append(f"Failed to get model config: {e}")
+        return _format_verification_result(False, None, None, errors, warnings, details)
+
+    # Step 2: Check MODEL_ATTRS
+    model_attrs = MODEL_ATTRS.get(model_class)
+    if model_attrs is None:
+        errors.append(
+            f"Model class '{model_class}' not found in MODEL_ATTRS. "
+            f"Supported classes: {list(MODEL_ATTRS.keys())}"
+        )
+    else:
+        logger.info(f"✅ MODEL_ATTRS found for {model_class}")
+        details["model_attrs"] = model_attrs
+
+        # Verify required MODEL_ATTRS fields
+        required_fields = ["moe_block", "gate_proj", "up_proj", "down_proj", "experts", "router", "num_experts"]
+        missing_fields = [f for f in required_fields if f not in model_attrs]
+        if missing_fields:
+            errors.append(f"MODEL_ATTRS missing required fields: {missing_fields}")
+        else:
+            logger.info(f"✅ All required MODEL_ATTRS fields present")
+
+    # Step 3: Check Observer Config
+    observer_config = OBSERVER_CONFIG_REGISTRY.get(model_class)
+    if observer_config is None:
+        errors.append(
+            f"Model class '{model_class}' not found in OBSERVER_CONFIG_REGISTRY. "
+            f"Supported classes: {list(OBSERVER_CONFIG_REGISTRY.keys())}"
+        )
+    else:
+        logger.info(f"✅ Observer config found for {model_class}")
+        details["observer_config"] = observer_config.__class__.__name__
+
+    # Step 4: If model provided, verify structure matches MODEL_ATTRS
+    if model is not None and model_attrs:
+        try:
+            structure_errors = _verify_model_structure(model, model_class, model_attrs)
+            if structure_errors:
+                errors.extend(structure_errors)
+            else:
+                logger.info(f"✅ Model structure matches MODEL_ATTRS")
+        except Exception as e:
+            errors.append(f"Failed to verify model structure: {e}\n{tb.format_exc()}")
+
+    # Step 5: Warnings for common issues
+    if model is not None and hasattr(model, 'config'):
+        if hasattr(model.config, 'quantization_config') and model.config.quantization_config:
+            if "MiniMax" in model_class and "4bit" in str(model.config.quantization_config).lower():
+                warnings.append("MiniMax-M2.5 models may have issues with pre-quantization. Ensure quantization_config is handled.")
+
+    valid = len(errors) == 0
+    return _format_verification_result(valid, model_class, model_attrs, errors, warnings, details)
+
+
+def _verify_model_structure(model: Any, model_class: str, model_attrs: dict[str, Any]) -> list[str]:
+    """Verify that the actual model structure matches MODEL_ATTRS."""
+    errors = []
+
+    # Find a decoder layer to inspect
+    layers = None
+    if hasattr(model, 'model'):
+        if hasattr(model.model, 'layers'):
+            layers = model.model.layers
+        elif hasattr(model.model, 'decoder'):
+            if hasattr(model.model.decoder, 'layers'):
+                layers = model.model.decoder.layers
+    elif hasattr(model, 'layers'):
+        layers = model.layers
+
+    if layers is None or len(layers) == 0:
+        return ["Could not find any decoder layers in the model"]
+
+    # Check first layer
+    layer = layers[0]
+    moe_block_path = model_attrs.get("moe_block")
+    if not moe_block_path:
+        return ["MODEL_ATTRS missing 'moe_block' path"]
+
+    # Navigate to MoE block
+    moe_block = None
+    current = layer
+    for attr in moe_block_path.split('.'):
+        if hasattr(current, attr):
+            moe_block = getattr(current, attr)
+            current = moe_block
+        else:
+            errors.append(f"Layer 0 missing attribute '{moe_block_path}' (failed at '{attr}')")
+            return errors
+
+    if moe_block is None:
+        errors.append(f"Could not find MoE block at path '{moe_block_path}' in layer 0")
+        return errors
+
+    logger.info(f"✅ Found MoE block: {moe_block.__class__.__name__}")
+
+    # Check experts
+    experts_path = model_attrs.get("experts")
+    if experts_path:
+        parts = experts_path.split('.')
+        current = moe_block
+        for i, part in enumerate(parts[:-1]) if len(parts) > 1 else []:
+            if hasattr(current, part):
+                current = getattr(current, part)
+            else:
+                errors.append(f"MoE block missing attribute '{part}' in experts path")
+                return errors
+
+        if hasattr(current, parts[-1]):
+            experts = getattr(current, parts[-1])
+            if hasattr(experts, '__len__'):
+                num_experts = len(experts)
+                logger.info(f"✅ Found {num_experts} experts")
+            else:
+                errors.append(f"Experts at '{experts_path}' is not a list/array")
+        else:
+            errors.append(f"MoE block missing 'experts' attribute at '{experts_path}'")
+
+    # Check router
+    router_path = model_attrs.get("router")
+    if router_path and hasattr(moe_block, router_path):
+        logger.info(f"✅ Found router: {getattr(moe_block, router_path).__class__.__name__}")
+    elif router_path:
+        errors.append(f"MoE block missing 'router' attribute at '{router_path}'")
+
+    return errors
+
+
+def _format_verification_result(
+    valid: bool,
+    model_class: str | None,
+    model_attrs: dict[str, Any] | None,
+    errors: list[str],
+    warnings: list[str],
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    """Format verification results into a structured dictionary."""
+    return {
+        "valid": valid,
+        "model_class": model_class,
+        "model_attrs": model_attrs,
+        "errors": errors,
+        "warnings": warnings,
+        "details": details,
+    }
+
+
+def print_verification_result(result: dict[str, Any]) -> None:
+    """Print verification results in a formatted way."""
+    print("\n" + "=" * 70)
+    print("REAP Model Configuration Verification")
+    print("=" * 70)
+
+    if result["model_class"]:
+        print(f"\n📦 Model Class: {result['model_class']}")
+
+    if result["valid"]:
+        print("\n✅ Configuration is VALID for REAP pruning!")
+    else:
+        print("\n❌ Configuration has ERRORS - pruning will likely FAIL!")
+
+    if result["model_attrs"]:
+        print(f"\n🔧 MODEL_ATTRS:")
+        for key, value in result["model_attrs"].items():
+            print(f"   {key}: {value}")
+
+    if result["details"].get("observer_config"):
+        print(f"\n🔍 Observer Config: {result['details']['observer_config']}")
+
+    if result["warnings"]:
+        print(f"\n⚠️  WARNINGS ({len(result['warnings'])}):")
+        for warning in result["warnings"]:
+            print(f"   - {warning}")
+
+    if result["errors"]:
+        print(f"\n❌ ERRORS ({len(result['errors'])}):")
+        for error in result["errors"]:
+            print(f"   - {error}")
+
+    print("\n" + "=" * 70)
+
 
 def register_llama_with_vllm():
     from vllm.model_executor.models import ModelRegistry

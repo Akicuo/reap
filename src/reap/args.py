@@ -52,6 +52,22 @@ class ReapArgs:
         default=False,
         metadata={"help": "Whether to only run the observer to collect activation data."},
     )
+    upload_calibration_to_hf: bool = field(
+        default=False,
+        metadata={"help": "Whether to automatically upload calibration .pt file to a new HuggingFace repo with a random name."},
+    )
+    discord_webhook: str | None = field(
+        default=None,
+        metadata={"help": "Discord webhook URL to send progress notifications during pruning."},
+    )
+    upload_pruned_to_hf: bool = field(
+        default=False,
+        metadata={"help": "Whether to automatically upload pruned models to HuggingFace with format: MODEL-REAP-{compression_pct}."},
+    )
+    verify_model_config: bool = field(
+        default=True,
+        metadata={"help": "Whether to verify model configuration before starting pruning to catch errors early."},
+    )
     do_eval: bool = field(
         default=True,
         metadata={"help": "Whether to run evaluation after merging experts."},
@@ -153,6 +169,15 @@ class ObserverArgs:
     overwrite_observations: bool = field(
         default=False,
         metadata={"help": "Whether to overwrite existing observer data files."},
+    )
+    load_observer_state: str | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Path to a saved observer state file (.pt) to load instead of running observation. "
+                "If provided, skips the observation phase and uses the saved data directly."
+            )
+        },
     )
     distance_measure: str = field(
         default="angular",

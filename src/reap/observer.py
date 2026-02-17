@@ -119,9 +119,9 @@ class PruningReport:
     category_expert_map: Optional[dict] = None
     
     def to_markdown(self) -> str:
-        """Generate full markdown report."""
+        """Generate full markdown report with expert-level detail."""
         num_layers = len(self.layers)
-        # Calculate per-layer averages (more meaningful than cumulative totals)
+        # Calculate per-layer averages
         experts_per_layer_before = self.total_experts_before // num_layers if num_layers > 0 else 0
         experts_per_layer_after = self.total_experts_after // num_layers if num_layers > 0 else 0
 
@@ -133,35 +133,28 @@ class PruningReport:
             f"**Compression Ratio:** {self.compression_ratio:.2%}",
             f"**Number of Layers:** {num_layers}",
             "",
-            "## Per-Layer Statistics",
+            "## Statistics",
             f"**Experts per Layer Before:** {experts_per_layer_before}",
             f"**Experts per Layer After:** {experts_per_layer_after}",
-            f"**Total Experts (All Layers):** {self.total_experts_before} → {self.total_experts_after}",
+            f"**Total Experts (All Layers):** {self.total_experts_before:,} → {self.total_experts_after:,}",
             "",
             "---",
             "",
+            "## Expert Details",
+            "",
+            "| Layer | Expert | Activation Count | Pruned | Saliency Score |",
+            "|-------|--------|------------------|--------|----------------|",
         ]
 
+        # Flatten all experts across layers into a single table
         for layer_report in self.layers:
-            lines.append(layer_report.to_markdown())
-            lines.append("")
-            lines.append("---")
-            lines.append("")
-
-        # Summary statistics
-        lines.extend([
-            "## Summary Statistics",
-            "",
-            "| Layer | Pruned Count | Retained Count | Pruning Rate |",
-            "|-------|--------------|----------------|--------------|",
-        ])
-        for layer_report in self.layers:
-            total = layer_report.n_pruned + layer_report.n_retained
-            rate = layer_report.n_pruned / total if total > 0 else 0
-            lines.append(
-                f"| {layer_report.layer_idx} | {layer_report.n_pruned} | "
-                f"{layer_report.n_retained} | {rate:.2%} |"
-            )
+            for expert in sorted(layer_report.experts, key=lambda e: e.expert_idx):
+                lines.append(
+                    f"| {layer_report.layer_idx} | {expert.expert_idx} | "
+                    f"{expert.activation_count:,} | "
+                    f"{'✓' if expert.pruned else '✗'} | "
+                    f"{expert.saliency_score:.4f} |"
+                )
 
         return "\n".join(lines)
     

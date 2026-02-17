@@ -120,25 +120,34 @@ class PruningReport:
     
     def to_markdown(self) -> str:
         """Generate full markdown report."""
+        num_layers = len(self.layers)
+        # Calculate per-layer averages (more meaningful than cumulative totals)
+        experts_per_layer_before = self.total_experts_before // num_layers if num_layers > 0 else 0
+        experts_per_layer_after = self.total_experts_after // num_layers if num_layers > 0 else 0
+
         lines = [
             "# Expert Pruning Report",
             "",
             f"**Model:** {self.model_name}",
             f"**Pruning Method:** {self.prune_method}",
             f"**Compression Ratio:** {self.compression_ratio:.2%}",
-            f"**Total Experts Before:** {self.total_experts_before}",
-            f"**Total Experts After:** {self.total_experts_after}",
+            f"**Number of Layers:** {num_layers}",
+            "",
+            "## Per-Layer Statistics",
+            f"**Experts per Layer Before:** {experts_per_layer_before}",
+            f"**Experts per Layer After:** {experts_per_layer_after}",
+            f"**Total Experts (All Layers):** {self.total_experts_before} → {self.total_experts_after}",
             "",
             "---",
             "",
         ]
-        
+
         for layer_report in self.layers:
             lines.append(layer_report.to_markdown())
             lines.append("")
             lines.append("---")
             lines.append("")
-        
+
         # Summary statistics
         lines.extend([
             "## Summary Statistics",
@@ -153,7 +162,7 @@ class PruningReport:
                 f"| {layer_report.layer_idx} | {layer_report.n_pruned} | "
                 f"{layer_report.n_retained} | {rate:.2%} |"
             )
-        
+
         return "\n".join(lines)
     
     def save(self, file_path: str | pathlib.Path):

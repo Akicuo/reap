@@ -728,10 +728,9 @@ def _upload_calibration_to_huggingface(observer_file_path: str, model_name: str,
     """
     Upload calibration observer state file to a new HuggingFace repository.
 
-    Creates a new repo with a random 12-character name and uploads the .pt file.
+    Creates a new repo with format: {username}/{MODEL}-{SampleSize}-OBS
     """
-    import string
-    import secrets
+    import re
     from huggingface_hub import HfApi, create_repo
 
     # Check if HF_TOKEN is available
@@ -751,9 +750,17 @@ def _upload_calibration_to_huggingface(observer_file_path: str, model_name: str,
         logger.warning(f"Could not get username: {e}. Using 'reap-calibration' as repo name.")
         username = "reap-calibration"
 
-    # Generate random 12-character suffix
-    random_suffix = ''.join(secrets.choice(string.ascii_lowercase) for _ in range(12))
-    repo_id = f"{username}/reap-calibration-{random_suffix}"
+    # Extract sample size from filename (e.g., "observations_1024_cosine.pt" -> 1024)
+    filename = os.path.basename(observer_file_path)
+    sample_size_match = re.search(r'observations_(\d+)_', filename)
+    sample_size = sample_size_match.group(1) if sample_size_match else "unknown"
+
+    # Clean model name for repo naming
+    clean_name = model_name.split("/")[-1] if "/" in model_name else model_name
+    clean_name = clean_name.replace(".", "-").replace("_", "-")
+
+    # Create repo_id: {username}/{MODEL}-{SampleSize}-OBS
+    repo_id = f"{username}/{clean_name}-{sample_size}-OBS"
 
     logger.info(f"Creating HuggingFace repository: {repo_id}")
 
@@ -777,8 +784,31 @@ def _upload_calibration_to_huggingface(observer_file_path: str, model_name: str,
         )
         logger.info(f"Successfully uploaded calibration file to: https://huggingface.co/{repo_id}")
 
+        # Send Discord notification if webhook is configured
+        if reap_args.discord_webhook:
+            _send_discord_notification(
+                title="📤 Calibration Uploaded to HuggingFace",
+                description=f"Observer calibration file successfully uploaded",
+                color=0x00BFFF,  # Deep Sky Blue
+                fields=[
+                    {"name": "Repository", "value": f"[{repo_id}](https://huggingface.co/{repo_id})", "inline": False},
+                    {"name": "Sample Size", "value": f"{sample_size}", "inline": True},
+                    {"name": "File", "value": f"`{filename}`", "inline": True},
+                ],
+                webhook_url=reap_args.discord_webhook,
+            )
+
     except Exception as e:
         logger.error(f"Failed to upload calibration file to HuggingFace: {e}")
+
+        # Send Discord notification on failure
+        if reap_args.discord_webhook:
+            _send_discord_notification(
+                title="❌ Calibration Upload Failed",
+                description=f"Failed to upload calibration file: {e}",
+                color=0xFF0000,  # Red
+                webhook_url=reap_args.discord_webhook,
+            )
 
 
 def _upload_pruned_model_to_huggingface(

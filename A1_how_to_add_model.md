@@ -454,6 +454,7 @@ python -m reap.prune \
 | ERNIE 4.5 | `Ernie4_5_MoEForCausalLM` | `Ernie4_5_MoeMLP` | No | Custom patch |
 | GLM-4.5 | `Glm4MoeForCausalLM` | `Glm4MoeMoE` | No | Custom patch |
 | GLM-4.7-Flash | `Glm4MoeLiteForCausalLM` | `Glm4MoeLiteMoE` | Yes | Fused grouped_mm |
+| **GLM-5** | `GlmMoeDsaForCausalLM` | `GlmMoeDsaMoE` | No | Hybrid: Routed + Shared experts (Layer 0 is dense) |
 | LongCat | `LongcatCausalLM` | `LongcatMoE` | No | Nested router |
 
 ---

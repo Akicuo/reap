@@ -230,6 +230,20 @@ MODEL_ATTRS = {
         "num_experts": "num_local_experts",
         "num_experts_per_tok": "num_experts_per_tok",
     },
+    # GLM-5 (GlmMoeDsaForCausalLM) - Hybrid MoE with routed + shared experts
+    # Layer 0 is dense (GlmMoeDsaMLP), layers 1+ are MoE (GlmMoeDsaMoE)
+    # 256 routed experts (prunable) + shared experts (not pruned)
+    "GlmMoeDsaForCausalLM": {
+        "moe_block": "mlp",
+        "gate_proj": "gate_proj",
+        "up_proj": "up_proj",
+        "down_proj": "down_proj",
+        "experts": "experts",
+        "fused": False,
+        "router": "gate",
+        "num_experts": "n_routed_experts",
+        "num_experts_per_tok": "num_experts_per_tok",
+    },
 
 }
 

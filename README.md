@@ -29,6 +29,10 @@ Pruned models are available in two formats:
   - [Akicou/GLM-4.7-Flash-REAP-39](https://huggingface.co/Akicou/GLM-4.7-Flash-REAP-39)
   - [Akicou/GLM-4.7-Flash-REAP-50](https://huggingface.co/Akicou/GLM-4.7-Flash-REAP-50)
   - [Akicou/INTELLECT-3-REAP-50-FP8-Dynamic](https://huggingface.co/Akicou/INTELLECT-3-REAP-50-FP8-Dynamic)
+  - [Akicou/MiniMax-M2-5-REAP-19](https://huggingface.co/Akicou/MiniMax-M2-5-REAP-19)
+  - [Akicou/MiniMax-M2-5-REAP-29](https://huggingface.co/Akicou/MiniMax-M2-5-REAP-29)
+  - [Akicou/MiniMax-M2-5-REAP-39](https://huggingface.co/Akicou/MiniMax-M2-5-REAP-39)
+  - [Akicou/MiniMax-M2-5-REAP-50](https://huggingface.co/Akicou/MiniMax-M2-5-REAP-50)
   - [Akicou/Solar-Open-69B-REAP](https://huggingface.co/Akicou/Solar-Open-69B-REAP)
   <!-- END-SFTNS -->
 

@@ -112,7 +112,22 @@ class MiniMaxM2MLP(nn.Module):
 Looking at `MiniMaxM2Experts`, it inherits from `nn.ModuleList` and appends individual `MiniMaxM2MLP` instances. This means:
 - **NOT fused** - each expert is a separate module
 
-## Step 7: Compile Configuration
+## Step 7: Find the MoE Block Location in Decoder Layer
+
+We inspected where the MoE block is located in the decoder layer:
+
+```python
+class MiniMaxM2DecoderLayer(nn.Module):
+    def __init__(self, config: MiniMaxM2Config):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.self_attn = MiniMaxM2Attention(config)
+        self.block_sparse_moe = MiniMaxM2SparseMoeBlock(config)  # <-- HERE
+```
+
+**Critical discovery:** The MoE block is at `block_sparse_moe`, not `mlp`!
+
+## Step 8: Compile Configuration
 
 Based on all findings, we compiled the configuration:
 
@@ -120,10 +135,10 @@ Based on all findings, we compiled the configuration:
 
 ```python
 "MiniMaxM2ForCausalLM": {
-    "moe_block": "mlp",
-    "gate_proj": "w1",          # NOT gate_proj
-    "up_proj": "w3",            # NOT up_proj
-    "down_proj": "w2",          # NOT down_proj
+    "moe_block": "block_sparse_moe",  # Updated: NOT "mlp"
+    "gate_proj": "w1",               # NOT gate_proj
+    "up_proj": "w3",                 # NOT up_proj
+    "down_proj": "w2",               # NOT down_proj
     "experts": "experts",
     "fused": False,
     "router": "gate",
@@ -137,26 +152,50 @@ Based on all findings, we compiled the configuration:
 ```python
 @dataclass
 class MiniMaxM2ObserverHookConfig(MoETransformerObserverConfig):
-    module_class_name_to_hook_regex: "MiniMaxM2SparseMoeBlock"
-    num_experts_attr_name: "config.num_local_experts"
-    top_k_attr_name: "config.num_experts_per_tok"
-    fused_experts: False
+    module_class_name_to_hook_regex: str = "MiniMaxM2SparseMoeBlock"
+    num_experts_attr_name: str = "experts.num_experts"  # Direct attribute, not config.path
+    top_k_attr_name: str = "top_k"                      # Direct attribute on MoE block
+    fused_experts: bool = False
 ```
 
-## Step 8: Add to Codebase
+**Key change:** Observer config uses direct attributes (`experts.num_experts` and `top_k`) instead of config paths, because the MoE block doesn't have a config attribute.
 
-1. **model_util.py** - Added MODEL_ATTRS entry
-2. **observer.py** - Added observer config class and registry entry
+### Auto-Patching Function:
+
+```python
+def _patch_minimax_m2(model: nn.Module) -> int:
+    """
+    Patch MiniMax-M2.5 model to disable use_cache for compatibility.
+
+    MiniMax-M2.5 has issues with DynamicCache and max_cache_len parameters.
+    Disabling use_cache fixes these issues.
+    """
+    patched_count = 0
+    if hasattr(model, 'config'):
+        original_use_cache = model.config.use_cache
+        model.config.use_cache = False
+        logger.info(f"Disabled use_cache for MiniMaxM2ForCausalLM")
+        patched_count += 1
+    return patched_count
+```
+
+## Step 9: Add to Codebase
+
+1. **model_util.py** - Added MODEL_ATTRS entry with `block_sparse_moe` path
+2. **observer.py** - Added observer config class with direct attribute paths
+3. **models/auto_patch.py** - Added `_patch_minimax_m2()` function and registered in `specific_patchers`
 
 ## Key Differences from Standard MoE Models
 
 | Attribute | Standard (e.g., Qwen3) | MiniMax-M2.5 |
 |-----------|------------------------|--------------|
+| moe_block location | `mlp` | `block_sparse_moe` |
 | gate_proj | `gate_proj` | `w1` |
 | up_proj | `up_proj` | `w3` |
 | down_proj | `down_proj` | `w2` |
 | num_experts key | `num_experts` | `num_local_experts` |
 | Router | `gate` or `router` | `gate` |
+| Observer attrs | `config.num_experts` | `experts.num_experts` (direct) |
 
 ## Challenges Encountered
 
@@ -164,9 +203,14 @@ class MiniMaxM2ObserverHookConfig(MoETransformerObserverConfig):
 2. **Custom model code** - Model uses `trust_remote_code=True` with custom implementation
 3. **Non-standard projection names** - w1/w2/w3 instead of gate_proj/up_proj/down_proj
 4. **Different config key** - `num_local_experts` instead of `num_experts`
+5. **Wrong moe_block path** - Initially thought it was `mlp`, but it's `block_sparse_moe`
+6. **Observer config attribute access** - MoE block doesn't have config attribute, needed direct attribute paths
+7. **CacheLayerMixin error** - DynamicCache incompatibility requiring use_cache=False
+8. **quantization_config=None** - Pre-quantized models need special handling
 
 ## Running Pruning
 
+### Basic pruning:
 ```bash
 python -m reap.prune \
     --model_name "MiniMaxAI/MiniMax-M2.5" \
@@ -174,3 +218,33 @@ python -m reap.prune \
     --prune_method reap \
     --dataset_name "theblackcat102/evol-codealpaca-v1"
 ```
+
+### Multi-ratio pruning with auto-upload:
+```bash
+export HF_TOKEN=your_token_here
+export DISCORD_WEBHOOK=your_webhook_url_here
+
+python -m reap.prune \
+    --model_name "MiniMaxAI/MiniMax-M2.5" \
+    --compression_ratio 0.1,0.2,0.3,0.4,0.5 \
+    --prune_method reap \
+    --dataset_name "theblackcat102/evol-codealpaca-v1" \
+    --upload_pruned_to_hf \
+    --discord_webhook "$DISCORD_WEBHOOK"
+```
+
+### Force re-pruning (skip existing):
+```bash
+python -m reap.prune \
+    --model_name "MiniMaxAI/MiniMax-M2.5" \
+    --compression_ratio 0.1,0.2,0.3,0.4,0.5 \
+    --prune_method reap \
+    --dataset_name "theblackcat102/evol-codealpaca-v1" \
+    --overwrite_pruned_model  # Force re-pruning even if directory exists
+```
+
+## Notes
+
+- **Smoke tests may fail** for MiniMax-M2.5 due to DynamicCache issues, but this doesn't affect the pruned model quality
+- **Model is reloaded for each compression ratio** to ensure correct pruning (unlike some other models that can reuse)
+- **use_cache is automatically disabled** during pruning to avoid cache-related errors

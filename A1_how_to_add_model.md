@@ -4,13 +4,19 @@ This guide explains how to add a HuggingFace Mixture-of-Experts (MoE) model to t
 
 ## Quick Start
 
-Many models will work automatically thanks to auto-detection. Try running your model first:
+Many models will work automatically thanks to auto-detection and built-in verification. Try running your model first:
 
 ```bash
 python -m reap.prune --model_name "your-org/your-model" --compression_ratio 0.5
 ```
 
-If it works, you're done! If you get errors about missing observer configs or model attributes, follow the steps below.
+**NEW:** REAP now includes automatic model configuration verification that runs before pruning. It will check:
+- Model is in `MODEL_ATTRS`
+- Observer config exists
+- Model structure matches configuration
+- All required attributes are present
+
+If verification fails, you'll see detailed error messages telling you exactly what's missing.
 
 ---
 
@@ -36,6 +42,17 @@ MODEL_ATTRS = {
 }
 ```
 
+### Finding the MoE Block Location
+
+The MoE block location varies by model. Common locations:
+
+| Location | Models |
+|----------|--------|
+| `mlp` | Qwen3, Mixtral, most standard MoE |
+| `block_sparse_moe` | MiniMax-M2.5, some custom implementations |
+| `feed_forward` | Llama4 |
+| `moe` | Some DeepSeek models |
+
 ### How to Find These Values
 
 Load your model and inspect its structure:
@@ -51,6 +68,7 @@ print(f"Model class: {model.__class__.__name__}")
 # Inspect config for expert counts
 print(f"Config attributes: {[a for a in dir(model.config) if not a.startswith('_')]}")
 print(f"num_experts: {getattr(model.config, 'num_experts', 'NOT FOUND')}")
+print(f"num_local_experts: {getattr(model.config, 'num_local_experts', 'NOT FOUND')}")
 print(f"num_experts_per_tok: {getattr(model.config, 'num_experts_per_tok', 'NOT FOUND')}")
 
 # Inspect first layer's MoE block
@@ -118,7 +136,7 @@ for layer in model.model.layers:
 | **Structure** | `experts` is `ModuleList[Expert]` | `experts` is a single module with tensor weights |
 | **Projections** | Separate `gate_proj`, `up_proj`, `down_proj` per expert | Combined `gate_up_proj` tensor, separate `down_proj` |
 | **Weight Storage** | `[num_experts]` Module objects | Single tensor `[num_experts, 2*intermediate, hidden]` |
-| **Examples** | Qwen3, Mixtral, DeepSeek | Llama4, GLM-4.7-Flash |
+| **Examples** | Qwen3, Mixtral, DeepSeek, MiniMax-M2.5 | Llama4, GLM-4.7-Flash |
 
 **Detection logic:**
 ```python
@@ -146,6 +164,21 @@ moe.experts[0].gate_proj  # nn.Linear for each expert separately
 },
 ```
 
+**Non-Standard Projection Names (like MiniMax-M2.5):**
+```python
+"MiniMaxM2ForCausalLM": {
+    "moe_block": "block_sparse_moe",  # NOT "mlp"!
+    "gate_proj": "w1",               # NOT gate_proj
+    "up_proj": "w3",                 # NOT up_proj
+    "down_proj": "w2",               # NOT down_proj
+    "experts": "experts",
+    "fused": False,
+    "router": "gate",
+    "num_experts": "num_local_experts",     # NOT num_experts
+    "num_experts_per_tok": "num_experts_per_tok",
+},
+```
+
 **Nested Router Weight (like LongCat):**
 ```python
 "LongcatCausalLM": {
@@ -161,14 +194,54 @@ moe.experts[0].gate_proj  # nn.Linear for each expert separately
 
 Edit `src/reap/observer.py` and add an entry to `OBSERVER_CONFIG_REGISTRY`.
 
+### IMPORTANT: Config Path vs Direct Attribute Access
+
+**NEW:** Some models don't have a `config` attribute in their MoE block. For these, you must use **direct attribute access**.
+
+**Option A: Config Path (Standard - MoE block has config attribute)**
+```python
+@dataclass
+class YourModelObserverHookConfig(MoETransformerObserverConfig):
+    module_class_name_to_hook_regex: Optional[str] = "YourMoEBlockClassName"
+    num_experts_attr_name: str = "config.num_experts"  # Access via model.config
+    top_k_attr_name: str = "config.num_experts_per_tok"
+    fused_experts: bool = False
+```
+
+**Option B: Direct Attribute (For models like MiniMax-M2.5 without config)**
+```python
+@dataclass
+class MiniMaxM2ObserverHookConfig(MoETransformerObserverConfig):
+    module_class_name_to_hook_regex: Optional[str] = "MiniMaxM2SparseMoeBlock"
+    num_experts_attr_name: str = "experts.num_experts"  # Direct: moe.experts.num_experts
+    top_k_attr_name: str = "top_k"                      # Direct: moe.top_k
+    fused_experts: bool = False
+```
+
+**How to detect which to use:**
+
+```python
+moe = model.model.layers[0].mlp  # or wherever MoE block is
+
+# Check if MoE block has config attribute
+if hasattr(moe, 'config'):
+    print("MoE block has config - use config.path format")
+    # Use: "config.num_experts"
+else:
+    print("MoE block has NO config - use direct attribute format")
+    # Use: "experts.num_experts" or similar
+```
+
+### Complete Example
+
 ```python
 from dataclasses import dataclass
 
 @dataclass
 class YourModelObserverHookConfig(MoETransformerObserverConfig):
     module_class_name_to_hook_regex: Optional[str] = "YourMoEBlockClassName"
-    num_experts_attr_name: str = "num_experts"  # or "config.num_experts"
-    top_k_attr_name: str = "num_experts_per_tok"  # or "config.top_k"
+    num_experts_attr_name: str = "num_experts"  # or "config.num_experts" or "experts.num_experts"
+    top_k_attr_name: str = "num_experts_per_tok"  # or "config.top_k" or "top_k"
     fused_experts: bool = False
 
 OBSERVER_CONFIG_REGISTRY = {
@@ -195,21 +268,36 @@ for layer in model.model.layers:
 ```python
 moe = model.model.layers[0].mlp  # or wherever MoE block is
 
-# Check direct attributes
+# IMPORTANT: Check if MoE block has config
+has_config = hasattr(moe, 'config')
+print(f"MoE block has config attribute: {has_config}")
+
+# Check direct attributes ON MoE block
 for attr in ["num_experts", "num_local_experts", "n_routed_experts"]:
     if hasattr(moe, attr):
-        print(f"Found: {attr}")
+        print(f"Found (direct): {attr}")
 
-# Check config attributes
-if hasattr(moe, "config"):
+# Check if MoE block has experts with num_experts
+if hasattr(moe, 'experts'):
+    experts = moe.experts
+    if hasattr(experts, 'num_experts'):
+        print(f"Found (experts.num_experts): experts.num_experts")
+
+# Check config attributes (only if has_config is True)
+if has_config:
     for attr in ["num_experts", "num_local_experts", "n_routed_experts", "moe_num_experts"]:
         if hasattr(moe.config, attr):
-            print(f"Found in config: {attr}")
+            print(f"Found (config): config.{attr}")
 
-# For top_k
+# For top_k - check MoE block directly first, then config
 for attr in ["top_k", "num_experts_per_tok", "k", "moe_k"]:
     if hasattr(moe, attr):
-        print(f"top_k attr: {attr}")
+        print(f"Found top_k (direct): {attr}")
+        break
+if has_config:
+    for attr in ["num_experts_per_tok", "top_k"]:
+        if hasattr(moe.config, attr):
+            print(f"Found top_k (config): config.{attr}")
 ```
 
 ---
@@ -317,14 +405,21 @@ def patched_model_map(model: str):
 Run the pruning pipeline:
 
 ```bash
-# Test with small compression first
+# Step 1: Verify config (runs automatically)
+python -m reap.prune \
+    --model_name "your-org/your-model" \
+    --compression_ratio 0.1 \
+    --verify_model_config True
+
+# Step 2: Test observer with small sample
 python -m reap.prune \
     --model_name "your-org/your-model" \
     --compression_ratio 0.1 \
     --prune_method reap \
-    --run_observer_only True
+    --run_observer_only True \
+    --samples_per_category 128
 
-# If observer works, run full pruning
+# Step 3: Full pruning test
 python -m reap.prune \
     --model_name "your-org/your-model" \
     --compression_ratio 0.5 \
@@ -338,8 +433,10 @@ python -m reap.prune \
 - [ ] Added entry to `MODEL_ATTRS` in `model_util.py`
 - [ ] Created observer config dataclass in `observer.py`
 - [ ] Added entry to `OBSERVER_CONFIG_REGISTRY` in `observer.py`
+- [ ] Verified config path vs direct attribute access for observer
 - [ ] (If needed) Added patcher in `auto_patch.py`
 - [ ] (If needed) Added local model mapping in `patched_model_map()`
+- [ ] Tested with `--verify_model_config True`
 - [ ] Tested observer with `--run_observer_only True`
 - [ ] Tested full pruning pipeline
 
@@ -352,27 +449,48 @@ python -m reap.prune \
 | Qwen3 MoE | `Qwen3MoeForCausalLM` | `Qwen3MoeSparseMoeBlock` | No | Standard |
 | Llama4 | `Llama4ForCausalLM` | `Llama4TextMoe` | Yes | Fused experts |
 | Mixtral | `MixtralForCausalLM` | `MixtralSparseMoeBlock` | No | Standard |
+| MiniMax-M2.5 | `MiniMaxM2ForCausalLM` | `MiniMaxM2SparseMoeBlock` | No | Non-standard projections (w1/w2/w3), block_sparse_moe location |
 | DeepSeek V2/V3 | `DeepseekV2ForCausalLM` | `DeepseekV2MoE` | No | Uses `experts_per_rank` |
 | ERNIE 4.5 | `Ernie4_5_MoEForCausalLM` | `Ernie4_5_MoeMLP` | No | Custom patch |
 | GLM-4.5 | `Glm4MoeForCausalLM` | `Glm4MoeMoE` | No | Custom patch |
 | GLM-4.7-Flash | `Glm4MoeLiteForCausalLM` | `Glm4MoeLiteMoE` | Yes | Fused grouped_mm |
+| **GLM-5** | `GlmMoeDsaForCausalLM` | `GlmMoeDsaMoE` | No | Hybrid: Routed + Shared experts (Layer 0 is dense) |
 | LongCat | `LongcatCausalLM` | `LongcatMoE` | No | Nested router |
 
 ---
 
 ## Troubleshooting
 
-### "No observer configuration registered for model X"
-Add an entry to `OBSERVER_CONFIG_REGISTRY` in `observer.py`.
+### Model Verification Failed
+**Error:** `Model X not in MODEL_ATTRS` or `No observer configuration registered for model X`
 
-### "Model X not in MODEL_ATTRS"
-Add an entry to `MODEL_ATTRS` in `model_util.py`.
+**Solution:** Add entries to `MODEL_ATTRS` and `OBSERVER_CONFIG_REGISTRY` in the appropriate files.
+
+### "Module X does not have expected 'num_experts' or 'top_k' attributes"
+**Error:** Observer tried to access `config.num_experts` but MoE block doesn't have a config attribute.
+
+**Solution:** Use direct attribute access like `"experts.num_experts"` or `"top_k"` instead of `"config.num_experts"`.
 
 ### "Could not retrieve router_logits"
 Your model needs patching. See Step 3.
 
-### "Module X does not have expected 'num_experts' or 'top_k' attributes"
-Check your `num_experts_attr_name` and `top_k_attr_name` in the observer config.
+### "MoE block missing attribute 'mlp'"
+**Error:** MODEL_ATTRS has wrong `moe_block` value.
+
+**Solution:** Check where the MoE block is actually located (might be `block_sparse_moe`, `feed_forward`, etc.).
+
+### "AttributeError: 'X' object has no attribute 'gate_proj'"
+**Error:** Wrong projection names in MODEL_ATTRS.
+
+**Solution:** Inspect the expert structure to find actual projection names (might be `w1`, `w2`, `w3` for some models).
 
 ### CUDA OOM during observation
 Use `--load_in_4bit True` to load the model in 4-bit quantization during observation.
+
+### Cache/DynamicCache errors
+**Error:** `CacheLayerMixin.__init__() got an unexpected keyword argument 'max_cache_len'`
+
+**Solution:** Add a custom patcher that sets `model.config.use_cache = False`.
+
+### Smoke test failures
+Smoke tests may fail for some models (like MiniMax-M2.5) due to cache issues, but this doesn't affect the pruned model quality. The pruned models work fine.

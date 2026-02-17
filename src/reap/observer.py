@@ -119,41 +119,43 @@ class PruningReport:
     category_expert_map: Optional[dict] = None
     
     def to_markdown(self) -> str:
-        """Generate full markdown report."""
+        """Generate full markdown report with expert-level detail."""
+        num_layers = len(self.layers)
+        # Calculate per-layer averages
+        experts_per_layer_before = self.total_experts_before // num_layers if num_layers > 0 else 0
+        experts_per_layer_after = self.total_experts_after // num_layers if num_layers > 0 else 0
+
         lines = [
             "# Expert Pruning Report",
             "",
             f"**Model:** {self.model_name}",
             f"**Pruning Method:** {self.prune_method}",
             f"**Compression Ratio:** {self.compression_ratio:.2%}",
-            f"**Total Experts Before:** {self.total_experts_before}",
-            f"**Total Experts After:** {self.total_experts_after}",
+            f"**Number of Layers:** {num_layers}",
+            "",
+            "## Statistics",
+            f"**Experts per Layer Before:** {experts_per_layer_before}",
+            f"**Experts per Layer After:** {experts_per_layer_after}",
+            f"**Total Experts (All Layers):** {self.total_experts_before:,} → {self.total_experts_after:,}",
             "",
             "---",
             "",
-        ]
-        
-        for layer_report in self.layers:
-            lines.append(layer_report.to_markdown())
-            lines.append("")
-            lines.append("---")
-            lines.append("")
-        
-        # Summary statistics
-        lines.extend([
-            "## Summary Statistics",
+            "## Expert Details",
             "",
-            "| Layer | Pruned Count | Retained Count | Pruning Rate |",
-            "|-------|--------------|----------------|--------------|",
-        ])
+            "| Layer | Expert | Activation Count | Pruned | Saliency Score |",
+            "|-------|--------|------------------|--------|----------------|",
+        ]
+
+        # Flatten all experts across layers into a single table
         for layer_report in self.layers:
-            total = layer_report.n_pruned + layer_report.n_retained
-            rate = layer_report.n_pruned / total if total > 0 else 0
-            lines.append(
-                f"| {layer_report.layer_idx} | {layer_report.n_pruned} | "
-                f"{layer_report.n_retained} | {rate:.2%} |"
-            )
-        
+            for expert in sorted(layer_report.experts, key=lambda e: e.expert_idx):
+                lines.append(
+                    f"| {layer_report.layer_idx} | {expert.expert_idx} | "
+                    f"{expert.activation_count:,} | "
+                    f"{'✓' if expert.pruned else '✗'} | "
+                    f"{expert.saliency_score:.4f} |"
+                )
+
         return "\n".join(lines)
     
     def save(self, file_path: str | pathlib.Path):
@@ -1018,6 +1020,26 @@ class MiniMaxM2ObserverHookConfig(MoETransformerObserverConfig):
     fused_experts: bool = False
 
 
+@dataclass
+class GlmMoeDsaObserverHookConfig(MoETransformerObserverConfig):
+    """Observer config for GLM-5 (GlmMoeDsaForCausalLM).
+
+    MoE architecture:
+    - Layer 0 is dense MLP (GlmMoeDsaMLP) - no MoE, skipped by observer
+    - Layers 1+: GlmMoeDsaMoE with:
+      - experts: GlmMoeDsaNaiveMoe (256 routed experts, prunable)
+      - gate: GlmMoeDsaTopkRouter (top_k=8)
+      - shared_experts: GlmMoeDsaMLP (shared experts, NOT pruned - always active)
+
+    Standard projection names (gate_proj, up_proj, down_proj).
+    Non-fused experts (separate Linear layers per expert).
+    """
+    module_class_name_to_hook_regex: Optional[str] = "GlmMoeDsaMoE"
+    num_experts_attr_name: str = "config.n_routed_experts"
+    top_k_attr_name: str = "config.num_experts_per_tok"
+    fused_experts: bool = False
+
+
 def _infer_moe_class_name(model) -> str | None:
     """Infer the MoE block class name by inspecting the model structure."""
     moe_patterns = ["MoE", "SparseMoeBlock", "MoeBlock", "MoeMLP", "ExpertLayer"]
@@ -1295,4 +1317,7 @@ OBSERVER_CONFIG_REGISTRY = {
     "LongcatForCausalLM": LongcatMoEObserverHookConfig,
     # MiniMaxAI/MiniMax-M2.5 - Uses w1/w2/w3 projections
     "MiniMaxM2ForCausalLM": MiniMaxM2ObserverHookConfig,
+    # GLM-5 (GlmMoeDsaForCausalLM) - Hybrid MoE with routed + shared experts
+    # Layer 0 is dense, layers 1+ have 256 routed experts + shared experts
+    "GlmMoeDsaForCausalLM": GlmMoeDsaObserverHookConfig,
 }

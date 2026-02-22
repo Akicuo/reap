@@ -1,0 +1,161 @@
+# MLX-specific configuration for REAP
+# This configuration is optimized for Apple Mac Studio (M3 Ultra)
+#
+# ⚠️ UNTESTED IMPLEMENTATION ⚠️
+# The MLX backend has not been runtime-tested on Apple Silicon hardware.
+# This config file is provided as a starting point but may need adjustments.
+# Please test and report issues!
+
+backend: mlx
+
+# Model configuration
+model:
+  # Model source - use mlx-community for pre-converted MLX models
+  # Alternative: use HuggingFace model name (will be auto-converted if mlx-lm supports it)
+  path: "mlx-community/DeepSeek-Coder-V2-Lite-Instruct-MLX"
+
+  # Or use a HuggingFace model (mlx-lm will attempt to load it directly)
+  # path: "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct"
+
+# Observation configuration
+observation:
+  # Which layers to monitor (empty list = all MoE layers)
+  layers_to_monitor: []
+
+  # Number of calibration samples to process
+  num_samples: 128
+
+  # Batch size for observation
+  batch_size: 4
+
+  # Maximum sequence length
+  max_length: 2048
+
+  # Distance measure for clustering
+  distance_measure: "cosine"
+
+  # Output file name for observer data
+  output_file_name: "observations_mlx.pt"
+
+# Pruning configuration
+pruning:
+  # Pruning strategy: "activation", "count", "reap", "frequency"
+  strategy: "activation"
+
+  # For "activation" strategy: minimum activation frequency (0-1)
+  # Experts with frequency below this threshold will be pruned
+  activation_threshold: 0.01  # Remove experts with <1% activation
+
+  # For "count" strategy: number of experts to keep per layer
+  # keep_n: 8  # Keep top 8 experts per layer
+
+  # For "reap" strategy: REAP-specific parameters
+  # combine router weights with activation norms
+
+  # Whether to preserve super experts (high-frequency experts)
+  preserve_super_experts: false
+
+  # Whether to preserve outlier experts
+  preserve_outliers: false
+
+# Merging configuration
+merging:
+  enable: false
+
+  # Similarity threshold for merging (0-1)
+  similarity_threshold: 0.95
+
+  # Merge method: "frequency_weighted_average", "average", "ties"
+  merge_method: "frequency_weighted_average"
+
+  # Whether to apply frequency penalty
+  frequency_penalty: true
+
+# Clustering configuration
+clustering:
+  # Expert similarity method
+  expert_sim: "ttm"
+
+  # Clustering method: "agglomerative", "kmeans"
+  cluster_method: "agglomerative"
+
+  # Linkage method for agglomerative clustering
+  linkage_method: "average"
+
+  # Compression ratio (for automatic cluster count calculation)
+  # Can be a single value or comma-separated list: "0.1,0.2,0.3,0.4,0.5"
+  compression_ratio: "0.5"
+
+  # Or specify exact number of clusters per layer
+  # num_clusters: 8
+
+# Evaluation configuration
+evaluation:
+  enable: true
+
+  # Use greedy decoding for evaluation
+  greedy: true
+
+  # Temperature (if not greedy)
+  temperature: 0.7
+
+  # Top-p sampling
+  top_p: 0.9
+
+  # Top-k sampling
+  top_k: 20
+
+  # Number of parallel tasks
+  parallel_tasks: 32
+
+  # LM Eval tasks to run
+  lm_eval_tasks:
+    - "winogrande"
+    - "arc_challenge"
+    - "boolq"
+    - "hellaswag"
+
+  # EvalPlus tasks to run
+  evalplus_tasks:
+    - "mbpp"
+    - "humaneval"
+
+# Output configuration
+output:
+  # Path to save pruned model
+  path: "output/pruned_model_mlx"
+
+  # Format: "safetensors" or "gguf"
+  format: "safetensors"
+
+  # Whether to upload to HuggingFace
+  upload_to_hf: false
+
+  # HuggingFace repo ID (for upload)
+  hf_repo_id: null
+
+# Logging configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  log_file: "reap_mlx.log"
+
+# Memory configuration (MLX uses unified memory)
+memory:
+  # Maximum memory to use (GB)
+  # Set to 0 to use all available memory
+  max_memory_gb: 0
+
+  # Whether to enable memory profiling
+  profile_memory: false
+
+# Conversion configuration (for converting PyTorch models to MLX)
+conversion:
+  # Whether to auto-convert PyTorch models if MLX version not found
+  auto_convert: false
+
+  # Path to save converted models
+  cache_dir: "artifacts/mlx_models"
+
+  # Quantization for conversion (optional)
+  # Options: "", "4bit", "8bit"
+  quantization: ""

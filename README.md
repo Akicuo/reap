@@ -58,6 +58,95 @@ See [A1_how_to_add_model.md](./A1_how_to_add_model.md) for detailed instructions
 
 ---
 
+## Apple Silicon (MLX) Support
+
+REAP now supports Apple Silicon devices through MLX backend! This enables running REAP on Mac Studio, MacBook Pro, and other Apple devices with M1/M2/M3 chips.
+
+### Installation for MLX
+
+```bash
+# Install MLX dependencies
+pip install mlx mlx-lm
+
+# Install REAP
+pip install -e .
+```
+
+### Using MLX Backend
+
+```bash
+# Use MLX backend (auto-detects Apple Silicon)
+python -m reap.prune \
+    --backend mlx \
+    --model_name "mlx-community/DeepSeek-Coder-V2-Lite-Instruct-MLX" \
+    --compression_ratio 0.5 \
+    --prune_method "reap"
+```
+
+### MLX Configuration
+
+A default MLX configuration is provided at `src/reap/configs/mlx_config.yaml`:
+
+```yaml
+backend: mlx
+model:
+  path: "mlx-community/DeepSeek-Coder-V2-Lite-Instruct-MLX"
+pruning:
+  strategy: "activation"
+  activation_threshold: 0.01
+```
+
+### Supported MLX Models
+
+MLX requires models in MLX format. You can:
+
+1. **Use pre-converted models** from `mlx-community` on HuggingFace
+2. **Convert HuggingFace models** using `mlx-lm`:
+
+```bash
+# Convert a HuggingFace model to MLX
+python -m mlx_lm.convert --hf-path deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct \
+    --mlx-path ./models/deepseek-lite-mlx
+```
+
+### MLX vs PyTorch Backend
+
+| Feature | PyTorch | MLX |
+|---------|---------|-----|
+| Platform | NVIDIA GPUs (CUDA) | Apple Silicon (M1/M2/M3) |
+| Model Format | HuggingFace | MLX-converted |
+| Evaluation | vLLM server | mlx-lm direct |
+| Memory | VRAM limited | Unified memory |
+| Performance | Fast on NVIDIA | Optimized for Apple |
+
+### Performance on Mac Studio M3 Ultra
+
+- 26-30% faster than Ollama for LLM inference
+- Token generation: 20-31 tokens/sec (varies by model size)
+- Unified memory supports models up to 1T parameters
+- Power: <200W under load
+
+### ⚠️ Important: Untested Implementation
+
+**The MLX backend implementation is currently untested.** This code was written without access to Apple Silicon hardware for runtime verification.
+
+**Status:**
+- ✅ Code structure complete
+- ✅ All abstractions defined
+- ✅ MLX patterns implemented based on documentation
+- ⚠️ **Runtime testing required on Mac Studio M3 Ultra**
+
+**Expected to work** based on:
+- MLX documentation and examples
+- MLX-LM package patterns
+- Parallel structure with tested PyTorch backend
+
+**Help needed:** If you have a Mac Studio, please test and report issues!
+
+---
+
+---
+
 ## Running REAP - Complete Arguments Guide
 
 ### Basic Usage

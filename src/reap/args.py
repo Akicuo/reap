@@ -41,6 +41,13 @@ def parse_single_compression_ratio(value: str | float | Iterable[float] | None) 
 
 @dataclass
 class ReapArgs:
+    backend: str = field(
+        default="torch",
+        metadata={
+            "help": "Backend to use for model operations.",
+            "choices": ["torch", "mlx"],
+        }
+    )
     seed: int = field(default=42, metadata={"help": "Random seed for reproducibility."})  # 11, 99
     debug: bool = field(
         default=False, metadata={"help": "Enable debug mode for more verbose output."}

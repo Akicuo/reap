@@ -10,14 +10,6 @@ Paper: [REAP the Experts: Why Pruning Prevails for One-Shot MoE Compression](htt
 
 ---
 
-## <img src="./fig/hf-transparent.png" alt="Sponsor" width='20'>  Sponsor This Work
-
-Running REAP on large MoE models requires significant GPU resources. I rent RunPod pods to prune these models and make them available to the community.
-
-If you find this work useful, consider [buying me a coffee](https://www.buymeacoffee.com/Akicou) to help cover GPU rental costs. Your support enables more pruned models to be released!
-
----
-
 ## Model Releases
 
 Pruned models are available in two formats:
